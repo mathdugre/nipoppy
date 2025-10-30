@@ -14,10 +14,10 @@ from nipoppy.config.container import ContainerConfig
 from nipoppy.container import ContainerHandler, get_container_handler
 from nipoppy.env import ContainerCommandEnum, StrOrPathLike
 from nipoppy.utils.utils import TEMPLATE_REPLACE_PATTERN
-from nipoppy.workflows.pipeline import BasePipelineWorkflow
+from nipoppy.workflows.pipeline import PipelineWorkflow
 
 
-class Runner(BasePipelineWorkflow, ABC):
+class Runner(PipelineWorkflow, ABC):
     """Abstract class for workflow runners."""
 
     # TODO Generic type for pipeline config and pipeline step config attributes

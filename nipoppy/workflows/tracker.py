@@ -7,10 +7,10 @@ from typing import Optional
 from nipoppy.config.tracker import TrackerConfig
 from nipoppy.env import EXT_TAR, StrOrPathLike
 from nipoppy.tabular.processing_status import ProcessingStatusTable
-from nipoppy.workflows.pipeline import BasePipelineWorkflow
+from nipoppy.workflows.pipeline import PipelineWorkflow
 
 
-class PipelineTracker(BasePipelineWorkflow):
+class PipelineTracker(PipelineWorkflow):
     """Pipeline tracker."""
 
     progress_bar_description = "Tracking..."

@@ -143,7 +143,7 @@ def get_pipeline_version(
         )
 
 
-class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
+class PipelineWorkflow(BaseDatasetWorkflow, ABC):
     """A workflow for a pipeline that has a Boutiques descriptor."""
 
     dname_hpc_logs = "hpc"
@@ -683,7 +683,7 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         if self._show_progress and n_total != 0:
             results_generator = rich.progress.track(
                 results_generator,
-                description=f'{" "*_INDENT}{self.progress_bar_description}',
+                description=f"{' ' * _INDENT}{self.progress_bar_description}",
                 total=n_total,
                 console=CONSOLE_STDOUT,
             )

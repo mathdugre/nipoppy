@@ -34,7 +34,7 @@ from nipoppy.env import (
 )
 from nipoppy.utils.utils import DPATH_HPC, FPATH_HPC_TEMPLATE, get_pipeline_tag
 from nipoppy.workflows.pipeline import (
-    BasePipelineWorkflow,
+    PipelineWorkflow,
     apply_analysis_level,
     get_pipeline_version,
 )
@@ -47,7 +47,7 @@ from tests.conftest import (
 )
 
 
-class PipelineWorkflow(BasePipelineWorkflow):
+class PipelineWorkflow(PipelineWorkflow):
     """Dummy pipeline workflow for testing."""
 
     def __init__(self, *args, **kwargs):
@@ -139,7 +139,7 @@ def reimport_joblib(mocker: pytest_mock.MockerFixture):
     mocker.stopall()
     import nipoppy.workflows.pipeline
     importlib.reload(nipoppy.workflows.pipeline)
-    from nipoppy.workflows.pipeline import BasePipelineWorkflow  # noqa F401
+    from nipoppy.workflows.pipeline import PipelineWorkflow  # noqa F401
     from nipoppy.workflows.pipeline import (
         JOBLIB_INSTALLED,
     )
@@ -239,7 +239,7 @@ def test_get_pipeline_version(
     dname_pipelines: str,
     pipeline_name: str,
     expected_version: str,
-    workflow: BasePipelineWorkflow,
+    workflow: PipelineWorkflow,
 ):
     assert (
         get_pipeline_version(
@@ -271,7 +271,7 @@ def test_get_pipeline_version_invalid_name(tmp_path: Path):
 )
 def test_init(args):
     workflow = PipelineWorkflow(**args)
-    assert isinstance(workflow, BasePipelineWorkflow)
+    assert isinstance(workflow, PipelineWorkflow)
     assert hasattr(workflow, "pipeline_name")
     assert hasattr(workflow, "pipeline_version")
     assert hasattr(workflow, "pipeline_step")
@@ -1036,7 +1036,7 @@ def test_get_results_generator_no_joblib(
     # check that mocking/reloading worked
     from nipoppy.workflows.pipeline import (  # noqa: F401
         JOBLIB_INSTALLED,
-        BasePipelineWorkflow,
+        PipelineWorkflow,
     )
     assert not JOBLIB_INSTALLED
     # fmt: on
