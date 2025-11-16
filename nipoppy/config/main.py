@@ -198,13 +198,13 @@ class Config(_SchemaWithContainerConfig):
         self, pipeline_config: BasePipelineConfig
     ) -> BasePipelineConfig:
         """Propagate the global container config to a pipeline config."""
-        pipeline_container_config = pipeline_config.get_container_config()
+        pipeline_container_config = pipeline_config.CONTAINER_CONFIG
         if pipeline_container_config.INHERIT:
             pipeline_container_config.merge(
                 self.CONTAINER_CONFIG, overwrite_command=True
             )
         for pipeline_step in pipeline_config.STEPS:
-            step_container_config = pipeline_step.get_container_config()
+            step_container_config = pipeline_step.CONTAINER_CONFIG
             if step_container_config.INHERIT:
                 step_container_config.merge(
                     pipeline_container_config, overwrite_command=True

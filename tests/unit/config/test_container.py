@@ -141,6 +141,6 @@ def test_schema_with_container_config():
         pass
 
     assert isinstance(
-        ClassWithContainerConfig(a=1, b=2).get_container_config(),
+        ClassWithContainerConfig(a=1, b=2).CONTAINER_CONFIG,
         ContainerConfig,
     )

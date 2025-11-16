@@ -163,7 +163,7 @@ class Runner(BasePipelineWorkflow, ABC):
         bind_paths = [self.layout.dpath_root] + bind_paths
 
         # get and process container config
-        container_config = self.pipeline_step_config.get_container_config()
+        container_config = self.pipeline_step_config.CONTAINER_CONFIG
         container_config = ContainerConfig(
             **self.process_template_json(
                 container_config.model_dump(),
@@ -186,7 +186,7 @@ class Runner(BasePipelineWorkflow, ABC):
         self.logger.debug(f"Boutiques config: {boutiques_config}")
         if boutiques_config != BoutiquesConfig():
             self.logger.debug("Updating container config with config from descriptor")
-            container_config.merge(boutiques_config.get_container_config())
+            container_config.merge(boutiques_config.CONTAINER_CONFIG)
 
         container_handler = get_container_handler(container_config, logger=self.logger)
 

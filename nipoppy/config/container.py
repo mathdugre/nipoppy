@@ -117,7 +117,3 @@ class _SchemaWithContainerConfig(BaseModel):
         default=ContainerConfig(),
         description="Configuration for running a container",
     )
-
-    def get_container_config(self) -> ContainerConfig:
-        """Return the pipeline's ContainerConfig object."""
-        return self.CONTAINER_CONFIG

@@ -211,7 +211,7 @@ def test_propagate_container_config(
     )
 
     Config(**data).propagate_container_config_to_pipeline(pipeline_config)
-    container_config = pipeline_config.get_step_config(step_name).get_container_config()
+    container_config = pipeline_config.get_step_config(step_name).CONTAINER_CONFIG
 
     assert container_config == ContainerConfig(**data_expected)
 
