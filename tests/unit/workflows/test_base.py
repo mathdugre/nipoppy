@@ -45,6 +45,37 @@ def test_run(workflow: BaseWorkflow):
     assert workflow.run() is None
 
 
+@pytest.mark.parametrize("failure_phase", [None, "setup", "main"])
+def test_run_always_cleans_up(failure_phase):
+    events = []
+
+    class Workflow(BaseWorkflow):
+        def run_setup(self):
+            events.append("setup")
+            if failure_phase == "setup":
+                raise RuntimeError("setup failed")
+
+        def run_main(self):
+            events.append("main")
+            if failure_phase == "main":
+                raise RuntimeError("main failed")
+
+        def run_cleanup(self):
+            events.append("cleanup")
+
+    workflow = Workflow("lifecycle-contract")
+    if failure_phase is None:
+        assert workflow.run() is None
+    else:
+        with pytest.raises(RuntimeError, match=f"{failure_phase} failed"):
+            workflow.run()
+    assert events == (
+        ["setup", "cleanup"]
+        if failure_phase == "setup"
+        else ["setup", "main", "cleanup"]
+    )
+
+
 # TODO we might want to move these tests to a separate test file or reorganize them
 # Previously, were using the BaseWorkflow.run_command method, which has been extracted
 # to a standalone function. The tests have been adapted accordingly.
