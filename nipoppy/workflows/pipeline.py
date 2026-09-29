@@ -9,7 +9,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import rich
 from pydantic import ValidationError
 
 from nipoppy.config.boutiques import (
@@ -24,7 +23,6 @@ from nipoppy.config.pipeline import (
 )
 from nipoppy.config.pipeline_step import AnalysisLevelType, ProcPipelineStepConfig
 from nipoppy.config.tracker import TrackerConfig
-from nipoppy.console import _INDENT, CONSOLE_STDOUT
 from nipoppy.container import get_container_handler
 from nipoppy.env import (
     BIDS_SESSION_PREFIX,
@@ -67,12 +65,18 @@ from nipoppy.workflows.services.cohort import (
     filter_by_subcohort,
     write_subcohort,
 )
+from nipoppy.workflows.services.execution import (
+    BatchResult,
+    iter_results,
+    log_summary,
+    run_item,
+)
 from nipoppy.workflows.services.templates import TemplateRenderer
 
 if TYPE_CHECKING:
     import bids
 try:
-    from joblib import Parallel, delayed
+    import joblib  # noqa: F401 - retain availability checks until Tracker migration
 
     JOBLIB_INSTALLED = True
 
@@ -481,55 +485,26 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
 
         return to_return
 
-    def _run_single_wrapper(self, participant_id, session_id) -> bool:
-        """
-        Run a single participant/session and handle exceptions.
-
-        This is a helper function for parallelization with joblib.
-        Returns (True, <result>) if the run was successful, (False, None) otherwise.
-        """
-        try:
-            # success
-            return True, self.run_single(participant_id, session_id)
-        except Exception as exception:
-            logger.error(
-                f"Error running {self.pipeline_name} {self.pipeline_version}"
-                f" on participant {participant_id}, session {session_id}"
-                f": {exception}"
-            )
-
-        # failure
-        return False, None
-
-    def _get_results_generator(self, participants_sessions: Iterable[tuple[str, str]]):
-        participants_sessions = list(participants_sessions)
-        n_total = len(participants_sessions)
-        if JOBLIB_INSTALLED:
-            wrapper_func = delayed(self._run_single_wrapper)
-        else:
-            wrapper_func = self._run_single_wrapper
-
-        results_generator = (
-            wrapper_func(participant_id, session_id)
-            for participant_id, session_id in participants_sessions
+    def _run_single_wrapper(self, participant_id, session_id):
+        """Run one domain item with shared error isolation."""
+        return run_item(
+            self.run_single,
+            self.pipeline_name,
+            self.pipeline_version,
+            participant_id,
+            session_id,
         )
 
-        if JOBLIB_INSTALLED:
-            results_generator = Parallel(
-                n_jobs=self.n_jobs,
-                backend="threading",
-                return_as="generator",
-            )(results_generator)
-
-        if self._show_progress and n_total != 0:
-            results_generator = rich.progress.track(
-                results_generator,
-                description=f"{' ' * _INDENT}{self.progress_bar_description}",
-                total=n_total,
-                console=CONSOLE_STDOUT,
-            )
-
-        return results_generator
+    def _get_results_generator(self, participants_sessions):
+        """Execute items with optional parallelism and progress reporting."""
+        return iter_results(
+            participants_sessions,
+            self._run_single_wrapper,
+            n_jobs=self.n_jobs,
+            show_progress=self._show_progress,
+            description=self.progress_bar_description,
+            joblib_installed=JOBLIB_INSTALLED,
+        )
 
     @staticmethod
     def apply_analysis_level(
@@ -581,56 +556,28 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
             participants_sessions, self.write_subcohort, self.dry_run
         )
 
-    def _run_locally(self, participants_sessions: list) -> None:
-        """Run pipeline locally and collect results."""
-        results = list(self._get_results_generator(participants_sessions))
-
-        if len(results) == 0:
-            run_statuses = []
-            run_single_results = []
-        else:
-            run_statuses, run_single_results = zip(*results)
-
-        self.n_success += sum(run_statuses)
-        self.n_total += len(run_statuses)
-        self.run_single_results = run_single_results
-
-        # update return code if needed
-        if (self.n_success != self.n_total) and (self.n_total != 0):
+    def _run_locally(self, participants_sessions):
+        """Collect typed outcomes from local execution."""
+        result = BatchResult.from_results(
+            self._get_results_generator(participants_sessions)
+        )
+        self.n_success += result.n_success
+        self.n_total += result.n_total
+        self.run_single_results = result.payloads if result.n_total else []
+        if self.n_total and self.n_success != self.n_total:
             self.return_code = ReturnCode.PARTIAL_SUCCESS
 
     def _log_summary_message(self):
-        """Log a summary message."""
-        if self.write_subcohort is not None:
-            logger.success(f"Wrote subcohort to {self.write_subcohort}")
-        elif self.n_total == 0:
-            logger.warning(
-                "No participants or sessions to run. Make sure there are no mistakes "
-                "in the input arguments, the dataset's manifest or config file, and/or "
-                "check the curation status file at "
-                f"{self.study.layout.fpath_curation_status}"
-            )
-            self.return_code = ReturnCode.NO_PARTICIPANTS_OR_SESSIONS_TO_RUN
-        elif self.hpc is not None:
-            if self.n_success == 0:
-                logger.failure("Failed to submit HPC jobs")
-            else:
-                logger.success(f"Successfully submitted {self.n_success} HPC job(s)")
-        else:
-            if self.pipeline_step_config.ANALYSIS_LEVEL == AnalysisLevelType.group:
-                log_msg = "Ran on the entire study"
-            else:
-                log_msg = (
-                    f"Ran for {self.n_success} out of "
-                    f"{self.n_total} participants or sessions"
-                )
-
-            if self.n_success == 0:
-                logger.error(log_msg)
-            elif self.n_success == self.n_total:
-                logger.success(log_msg)
-            else:
-                logger.warning(log_msg)
+        """Report the current outcome using the shared summary policy."""
+        code = log_summary(
+            BatchResult(self.n_success, self.n_total),
+            self.write_subcohort,
+            self.hpc,
+            self.pipeline_step_config.ANALYSIS_LEVEL,
+            self.study.layout.fpath_curation_status,
+        )
+        if code is not None:
+            self.return_code = code
 
     @abstractmethod
     def get_participants_sessions_to_run(

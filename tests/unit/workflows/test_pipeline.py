@@ -1014,7 +1014,7 @@ def test_get_results_generator_no_joblib(
 
     # also mock joblib.delayed which is not supposed to be called
     # when joblib is not installed
-    mocked_delayed = mocker.patch("nipoppy.workflows.pipeline.delayed")
+    mocked_delayed = mocker.patch("nipoppy.workflows.services.execution.delayed")
 
     # reload the module
     # fmt: off
@@ -1040,7 +1040,9 @@ def test_get_results_generator_with_progress_bar(
     workflow._show_progress = True
     participants_sessions = [("001", "1")]
 
-    mocked_track = mocker.patch("nipoppy.workflows.pipeline.rich.progress.track")
+    mocked_track = mocker.patch(
+        "nipoppy.workflows.services.execution.rich.progress.track"
+    )
 
     workflow._get_results_generator(participants_sessions)
     mocked_track.assert_called_once()
@@ -1057,7 +1059,9 @@ def test_get_results_generator_no_progress_bar(
 ):
     workflow._show_progress = show_progress
 
-    mocked_track = mocker.patch("nipoppy.workflows.pipeline.rich.progress.track")
+    mocked_track = mocker.patch(
+        "nipoppy.workflows.services.execution.rich.progress.track"
+    )
 
     workflow._get_results_generator(participants_sessions)
     mocked_track.assert_not_called()
