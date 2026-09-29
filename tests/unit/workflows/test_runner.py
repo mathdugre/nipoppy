@@ -20,6 +20,7 @@ from nipoppy.pipeline_validation import check_pipeline_bundle
 from nipoppy.utils.utils import get_pipeline_tag
 from nipoppy.workflows.processing_runner import ProcessingRunner
 from nipoppy.workflows.runner import Runner
+from nipoppy.workflows.services.boutiques import inject_container_image
 from tests.conftest import (
     _set_up_substitution_testing,
     create_empty_dataset,
@@ -301,7 +302,7 @@ def test_inject_container_image(
     expected_image: str,
     expected_type: str,
 ):
-    descriptor = runner._inject_container_image(descriptor=runner.descriptor, uri=uri)
+    descriptor = inject_container_image(descriptor=runner.descriptor, uri=uri)
     assert "container-image" in descriptor
     assert descriptor["container-image"]["image"] == expected_image
     assert descriptor["container-image"]["type"] == expected_type
@@ -311,7 +312,7 @@ def test_inject_container_image_invalid_uri(
     runner: Runner,
     caplog: pytest.LogCaptureFixture,
 ):
-    runner._inject_container_image(descriptor=runner.descriptor, uri="invalid_uri")
+    inject_container_image(descriptor=runner.descriptor, uri="invalid_uri")
     assert "Failed to parse CONTAINER_INFO.URI" in caplog.text
 
 
@@ -447,8 +448,9 @@ def test_launch_boutiques_run_container_image(
 
     original_descriptor = copy.deepcopy(runner.descriptor)
 
-    mocked_inject_container_image = mocker.patch.object(
-        runner, "_inject_container_image", wraps=runner._inject_container_image
+    mocked_inject_container_image = mocker.patch(
+        "nipoppy.workflows.services.boutiques.inject_container_image",
+        wraps=inject_container_image,
     )
 
     runner.launch_boutiques_run(participant_id="01", session_id="BL")
@@ -466,8 +468,9 @@ def test_launch_boutiques_run_no_container_image(
     # remove [[NIPOPPY_DPATH_BIDS]]
     runner.descriptor["command-line"] = "echo [ARG1] [ARG2]"
 
-    mocked_inject_container_image = mocker.patch.object(
-        runner, "_inject_container_image", wraps=runner._inject_container_image
+    mocked_inject_container_image = mocker.patch(
+        "nipoppy.workflows.services.boutiques.inject_container_image",
+        wraps=inject_container_image,
     )
 
     runner.launch_boutiques_run(participant_id="01", session_id="BL")

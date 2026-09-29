@@ -358,7 +358,7 @@ def test_fpath_container(workflow: PipelineWorkflow, mocker: pytest_mock.MockFix
     fpath_container.touch()
 
     mocked = mocker.patch(
-        "nipoppy.workflows.pipeline.get_container_handler",
+        "nipoppy.workflows.services.boutiques.get_container_handler",
         return_value=ApptainerHandler(),
     )
 

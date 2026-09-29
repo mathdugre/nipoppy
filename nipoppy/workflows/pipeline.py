@@ -9,12 +9,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
-
-from nipoppy.config.boutiques import (
-    BoutiquesConfig,
-    get_boutiques_config_from_descriptor,
-)
 from nipoppy.config.pipeline import (
     BasePipelineConfig,
     BIDSificationPipelineConfig,
@@ -23,7 +17,6 @@ from nipoppy.config.pipeline import (
 )
 from nipoppy.config.pipeline_step import AnalysisLevelType, ProcPipelineStepConfig
 from nipoppy.config.tracker import TrackerConfig
-from nipoppy.container import get_container_handler
 from nipoppy.env import (
     BIDS_SESSION_PREFIX,
     BIDS_SUBJECT_PREFIX,
@@ -32,9 +25,6 @@ from nipoppy.env import (
     StrOrPathLike,
 )
 from nipoppy.exceptions import (
-    ConfigError,
-    ContainerError,
-    FileOperationError,
     ReturnCode,
     WorkflowError,
 )
@@ -58,6 +48,10 @@ from nipoppy.workflows.services.artifacts import (
     load_pipeline_config,
     load_pybids_ignore_patterns,
     load_tracker_config,
+)
+from nipoppy.workflows.services.boutiques import (
+    load_boutiques_config,
+    resolve_container_file,
 )
 from nipoppy.workflows.services.cohort import (
     apply_analysis_level,
@@ -240,36 +234,9 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         return self.pipeline_config.get_step_config(step_name=self.pipeline_step)
 
     @cached_property
-    def fpath_container(self) -> Path:
-        """Return the full path to the pipeline's container."""
-        uri = self.pipeline_config.CONTAINER_INFO.URI
-        fpath_container = self.pipeline_config.CONTAINER_INFO.FILE
-        container_handler = get_container_handler(
-            self.pipeline_step_config.CONTAINER_CONFIG,
-        )
-
-        try:
-            is_downloaded = container_handler.is_image_downloaded(uri, fpath_container)
-        except ContainerError as e:
-            raise WorkflowError(
-                f"Error in container config for pipeline {self.pipeline_name} "
-                f"{self.pipeline_version}: {e}"
-            ) from e
-
-        if not is_downloaded:
-            error_message = (
-                f"No container image file found for pipeline"
-                f" {self.pipeline_name} {self.pipeline_version}"
-            )
-            if uri is not None:
-                pull_command = container_handler.get_pull_command(uri, fpath_container)
-                error_message += (
-                    ". This file can be downloaded to the appropriate path by running "
-                    f"the following command:\n\n{pull_command}"
-                )
-            raise FileOperationError(error_message)
-
-        return fpath_container
+    def fpath_container(self):
+        """Load container execution inputs using the Boutiques module."""
+        return resolve_container_file(self.pipeline_config, self.pipeline_step_config)
 
     @cached_property
     def descriptor(self) -> dict:
@@ -313,29 +280,8 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
 
     @cached_property
     def boutiques_config(self):
-        """Get the Boutiques configuration."""
-        try:
-            boutiques_config = get_boutiques_config_from_descriptor(
-                self.descriptor,
-            )
-        except ValidationError as e:
-            error_message = str(e) + str(e.errors())
-            raise WorkflowError(
-                f"Error when loading the Boutiques config from descriptor"
-                f": {error_message}"
-            )
-        except ConfigError as e:
-            logger.debug(
-                "Caught exception when trying to load Boutiques config"
-                f": {type(e).__name__}: {e}"
-            )
-            logger.debug(
-                "Assuming Boutiques config is not in descriptor. Using default"
-            )
-            return BoutiquesConfig()
-
-        logger.info(f"Loaded Boutiques config from descriptor: {boutiques_config}")
-        return boutiques_config
+        """Load container execution inputs using the Boutiques module."""
+        return load_boutiques_config(self.descriptor)
 
     def _get_pipeline_config(
         self,

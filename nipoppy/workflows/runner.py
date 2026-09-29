@@ -1,27 +1,22 @@
 """Abstract class for workflow runners and runner utilities."""
 
-import copy
-import json
 import shlex
 from abc import ABC
 from functools import cached_property
-from pathlib import Path
 
-from boutiques import bosh
 from typing_extensions import override
 
-from nipoppy.config.boutiques import BoutiquesConfig
-from nipoppy.config.container import ContainerConfig
 from nipoppy.config.hpc import HpcConfig
-from nipoppy.container import ContainerHandler, get_container_handler
-from nipoppy.env import ContainerCommandEnum, StrOrPathLike
 from nipoppy.logger import get_logger
 from nipoppy.pipeline_validation import check_pipeline_bundle
-from nipoppy.utils.utils import TEMPLATE_REPLACE_PATTERN, get_pipeline_tag, load_json
+from nipoppy.utils.utils import get_pipeline_tag, load_json
 from nipoppy.workflows.base import _run_command
 from nipoppy.workflows.pipeline import BasePipelineWorkflow
 from nipoppy.workflows.services.boutiques import (
     BoshRunnerCallable,
+    execute_invocation,
+    prepare_container,
+    prepare_invocation,
     run_bosh_launch,
     run_bosh_simulate,
 )
@@ -145,178 +140,37 @@ class Runner(BasePipelineWorkflow, ABC):
         else:
             return run_bosh_launch
 
-    def _inject_container_image(self, descriptor: dict, uri: str) -> dict:
-        descriptor = copy.deepcopy(descriptor)
-        scheme, sep, image = uri.partition("://")
-        if not sep:
-            logger.error(f"Failed to parse CONTAINER_INFO.URI {uri}.")
-        else:
-            container_type = "docker" if scheme == "docker" else "singularity"
-            descriptor["container-image"] = {
-                "image": image,
-                "type": container_type,
-            }
-        return descriptor
-
     def launch_boutiques_run(
-        self,
-        participant_id: str,
-        session_id: str,
-        container_handler: ContainerHandler | None = None,
-        objs: list | None = None,
-        **kwargs,
+        self, participant_id, session_id, container_handler=None, objs=None, **kwargs
     ):
-        """Launch a pipeline run using Boutiques."""
-        bosh_exec_launch_args = ["--no-pull"]
-
-        if self.verbose:
-            bosh_exec_launch_args.append("--debug")
-
-        # process the descriptor if it containers Nipoppy-specific placeholder
-        # expressions (legacy behaviour)
-        if TEMPLATE_REPLACE_PATTERN.search(self.descriptor["command-line"]) is not None:
-            logger.info("Processing the JSON descriptor")
-            descriptor_str = self.process_template_json(
-                self.descriptor,
-                participant_id=participant_id,
-                session_id=session_id,
-                objs=objs,
-                **kwargs,
-                return_str=True,
-            )
-        else:
-            descriptor = self.descriptor
-
-            # if the descriptor is missing "container-image" but CONTAINER_INFO.URI is
-            # set in the pipeline config, inject "container-image" so that the pipeline
-            # container will still run in a container
-            if (
-                descriptor.get("container-image") is None
-                and self.pipeline_config.CONTAINER_INFO.URI is not None
-            ):
-                logger.warning(
-                    "Descriptor is missing a 'container-image' field."
-                    " Using information from CONTAINER_INFO.URI instead."
-                )
-
-                descriptor = self._inject_container_image(
-                    descriptor, self.pipeline_config.CONTAINER_INFO.URI
-                )
-
-            descriptor_str = json.dumps(descriptor)
-            if container_handler is None or descriptor.get("container-image") is None:
-                bosh_exec_launch_args.append("--no-container")
-            else:
-                bosh_exec_launch_args.extend(
-                    [
-                        "--no-automount",
-                        f"--container-opts={shlex.join(container_handler.args)}",
-                    ]
-                )
-                match container_handler.command:
-                    case ContainerCommandEnum.SINGULARITY:
-                        bosh_exec_launch_args.extend(
-                            [
-                                "--imagepath",
-                                str(self.fpath_container),
-                                "--force-singularity",
-                            ]
-                        )
-                    case ContainerCommandEnum.APPTAINER:
-                        bosh_exec_launch_args.extend(
-                            [
-                                "--imagepath",
-                                str(self.fpath_container),
-                                "--force-apptainer",
-                            ]
-                        )
-                    case ContainerCommandEnum.DOCKER:
-                        bosh_exec_launch_args.append("--force-docker")
-
-        # validate the descriptor
-        logger.debug(f"Descriptor string: {descriptor_str}")
-        logger.info("Validating the JSON descriptor")
-        bosh(["validate", descriptor_str])
-
-        # process and validate the invocation
-        logger.info("Processing the JSON invocation")
-        invocation_str = self.process_template_json(
+        """Prepare and execute a pipeline invocation using the Boutiques module."""
+        prepared = prepare_invocation(
+            self.descriptor,
             self.invocation,
-            participant_id=participant_id,
-            session_id=session_id,
-            objs=objs,
+            self.process_template_json,
+            self.pipeline_config.CONTAINER_INFO.URI,
+            lambda: self.fpath_container,
+            participant_id,
+            session_id,
+            container_handler,
+            objs,
+            self.verbose,
             **kwargs,
-            return_str=True,
         )
-        logger.debug(f"Invocation string: {invocation_str}")
-        logger.info("Validating the JSON invocation")
-        bosh(["invocation", "-i", invocation_str, descriptor_str])
+        execute_invocation(prepared, self.bosh_runner, _run_command, self.dry_run)
+        return prepared.descriptor_str, prepared.invocation_str
 
-        # run as a subprocess so that stdout/error are captured in the log
-        # by default, this will raise an exception if the command fails
-        self.bosh_runner(
-            invocation_str=invocation_str,
-            descriptor_str=descriptor_str,
-            bosh_exec_launch_args=bosh_exec_launch_args,
-            run_command=_run_command,
-            dry_run=self.dry_run,
+    def process_container_config(self, participant_id, session_id, bind_paths=None):
+        """Render container options and add domain bind paths."""
+        return prepare_container(
+            self.pipeline_step_config.get_container_config(),
+            self.boutiques_config,
+            self.process_template_json,
+            self.study.layout.dpath_root,
+            participant_id,
+            session_id,
+            bind_paths,
         )
-
-        return descriptor_str, invocation_str
-
-    def process_container_config(
-        self,
-        participant_id: str,
-        session_id: str,
-        bind_paths: list[StrOrPathLike] | None = None,
-    ) -> tuple[str, ContainerHandler]:
-        """Update container config and generate container command."""
-        if bind_paths is None:
-            bind_paths = []
-
-        # always bind the dataset's root directory
-        bind_paths = [self.study.layout.dpath_root] + bind_paths
-
-        # get and process container config
-        container_config = self.pipeline_step_config.get_container_config()
-        container_config = ContainerConfig(
-            **self.process_template_json(
-                container_config.model_dump(),
-                participant_id=participant_id,
-                session_id=session_id,
-            )
-        )
-        logger.debug(f"Initial container config: {container_config}")
-
-        # get and process Boutiques config
-        boutiques_config = BoutiquesConfig(
-            **self.process_template_json(
-                self.boutiques_config.model_dump(),
-                participant_id=participant_id,
-                session_id=session_id,
-            )
-        )
-
-        # update container config with additional information from Boutiques config
-        logger.debug(f"Boutiques config: {boutiques_config}")
-        if boutiques_config != BoutiquesConfig():
-            logger.debug("Updating container config with config from descriptor")
-            container_config.merge(boutiques_config.get_container_config())
-
-        container_handler = get_container_handler(container_config)
-
-        # add bind paths
-        for bind_path in bind_paths:
-            if Path(bind_path).resolve() != Path.cwd().resolve():
-                container_handler.add_bind_arg(bind_path)
-
-        logger.debug(f"Using container handler: {container_handler}")
-
-        container_command = container_handler.get_shell_command(
-            subcommand=boutiques_config.CONTAINER_SUBCOMMAND,
-        )
-
-        return container_command, container_handler
 
     @override
     def _handle_execution_strategy(self, participants_sessions):
