@@ -34,22 +34,24 @@ def create_processing_workflow(
     """Construct the processing workflow from normalized CLI parameters."""
     from nipoppy.workflows.processing_runner import ProcessingRunner
 
-    return ProcessingRunner(
-        dpath_root=dpath_root,
-        pipeline_name=pipeline_name,
-        pipeline_version=pipeline_version,
-        pipeline_step=pipeline_step,
-        participant_id=participant_id,
-        session_id=session_id,
-        use_subcohort=use_subcohort,
+    request = PipelineRequest(
+        PipelineTypeEnum.PROCESSING, pipeline_name, pipeline_version, pipeline_step
+    )
+    selection = SelectionOptions(participant_id, session_id, use_subcohort)
+    execution = ExecutionOptions(
         simulate=simulate,
         keep_workdir=keep_workdir,
-        tar=tar,
+        hpc=hpc,
         write_subcohort=write_subcohort,
         fpath_layout=fpath_layout,
         verbose=verbose,
         dry_run=dry_run,
-        hpc=hpc,
+    )
+    return ProcessingRunner(
+        tar=tar,
+        **create_pipeline_dependencies(
+            dpath_root, "process", request, selection, execution
+        ),
     )
 
 

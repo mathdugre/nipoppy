@@ -2,6 +2,7 @@
 
 import json
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,10 +19,16 @@ from nipoppy.exceptions import (
 from nipoppy.tabular.curation_status import CurationStatusTable
 from nipoppy.tabular.manifest import Manifest
 from nipoppy.tabular.processing_status import ProcessingStatusTable
+from nipoppy.workflows.factories import create_processing_workflow
 from nipoppy.workflows.processing_runner import (
     ProcessingRunner,
-    _get_bids_paths_to_inject,
 )
+from nipoppy.workflows.services.archive import check_archive_config, tar_directory
+from nipoppy.workflows.services.bids import (
+    get_bids_paths_to_inject as _get_bids_paths_to_inject,
+)
+from nipoppy.workflows.services.cohort import SelectionOptions, WorkItem
+from nipoppy.workflows.services.execution import BatchResult
 from tests.conftest import (
     create_empty_dataset,
     create_pipeline_config_files,
@@ -32,15 +39,15 @@ from tests.conftest import (
 
 @pytest.fixture(scope="function")
 def runner(tmp_path: Path, mocker: pytest_mock.MockFixture) -> ProcessingRunner:
-    runner = ProcessingRunner(
+    runner = create_processing_workflow(
         dpath_root=tmp_path / "my_dataset",
         pipeline_name="dummy_pipeline",
         pipeline_version="1.0.0",
     )
 
-    create_empty_dataset(runner.study.layout.dpath_root)
+    create_empty_dataset(runner.dataset.study.layout.dpath_root)
 
-    runner.study.config = get_config(
+    runner.dataset.study.config = get_config(
         container_config={
             "COMMAND": "apptainer",  # mocked
             "ARGS": ["--flag1"],
@@ -59,7 +66,7 @@ def runner(tmp_path: Path, mocker: pytest_mock.MockFixture) -> ProcessingRunner:
     fpath_container.touch()
 
     create_pipeline_config_files(
-        runner.study.layout.dpath_pipelines,
+        runner.dataset.study.layout.dpath_pipelines,
         processing_pipelines=[
             {
                 "NAME": "dummy_pipeline",
@@ -112,17 +119,17 @@ def runner(tmp_path: Path, mocker: pytest_mock.MockFixture) -> ProcessingRunner:
         "arg1": "[[NIPOPPY_PARTICIPANT_ID]] [[NIPOPPY_BIDS_SESSION_ID]]",
         "arg2": 10,
     }
-    (runner.dpath_pipeline_bundle / fname_descriptor).write_text(json.dumps(descriptor))
-    (runner.dpath_pipeline_bundle / fname_invocation).write_text(json.dumps(invocation))
+    (runner.pipeline.bundle / fname_descriptor).write_text(json.dumps(descriptor))
+    (runner.pipeline.bundle / fname_invocation).write_text(json.dumps(invocation))
 
     participants_and_sessions = {"01": ["1", "2", "3"], "02": ["1"]}
-    create_empty_dataset(runner.study.layout.dpath_root)
+    create_empty_dataset(runner.dataset.study.layout.dpath_root)
     manifest = prepare_dataset(
         participants_and_sessions_manifest=participants_and_sessions,
         participants_and_sessions_bidsified=participants_and_sessions,
-        dpath_bidsified=runner.study.layout.dpath_bids,
+        dpath_bidsified=runner.dataset.study.layout.dpath_bids,
     )
-    manifest.save_with_backup(runner.study.layout.fpath_manifest)
+    manifest.save_with_backup(runner.dataset.study.layout.fpath_manifest)
     return runner
 
 
@@ -184,17 +191,19 @@ def test_get_bids_paths_to_inject_error_no_single_match(
 
 
 def test_run_setup(runner: ProcessingRunner, mocker: pytest_mock.MockFixture):
-    mocked_check_tar_conditions = mocker.patch.object(runner, "_check_tar_conditions")
+    mocked_check_tar_conditions = mocker.patch(
+        "nipoppy.workflows.processing_runner.check_archive_config"
+    )
     runner.run_setup()
-    assert runner.dpath_pipeline_output.exists()
-    assert runner.dpath_pipeline_work.exists()
+    assert runner.output.exists()
+    assert runner.workspace.work.exists()
     mocked_check_tar_conditions.assert_called_once()
 
 
 @pytest.mark.parametrize("keep_workdir", [True, False])
 def test_run_cleanup(runner: ProcessingRunner, keep_workdir):
-    runner.keep_workdir = keep_workdir
-    dpaths = [runner.dpath_pipeline_bids_db, runner.dpath_pipeline_work]
+    runner.execution = replace(runner.execution, keep_workdir=keep_workdir)
+    dpaths = [runner.workspace.bids_db, runner.workspace.work]
     for dpath in dpaths:
         dpath.mkdir(parents=True)
     runner.run_cleanup()
@@ -207,14 +216,13 @@ def test_run_cleanup(runner: ProcessingRunner, keep_workdir):
 
 @pytest.mark.parametrize("n_success", [1, 2])
 def test_run_failed_cleanup(runner: ProcessingRunner, n_success):
-    runner.keep_workdir = False
-    runner.n_success = n_success
-    runner.n_total = 2
-    dpaths = [runner.dpath_pipeline_bids_db, runner.dpath_pipeline_work]
+    runner.execution = replace(runner.execution, keep_workdir=False)
+    runner.result = BatchResult(n_success, 2)
+    dpaths = [runner.workspace.bids_db, runner.workspace.work]
     for dpath in dpaths:
         dpath.mkdir(parents=True)
     runner.run_cleanup()
-    if runner.n_success == runner.n_total:
+    if runner.result.n_success == runner.result.n_total:
         assert not dpath.exists()
     else:
         assert dpath.exists()
@@ -222,30 +230,36 @@ def test_run_failed_cleanup(runner: ProcessingRunner, n_success):
 
 def test_check_tar_conditions_no_tracker_config(runner: ProcessingRunner):
     runner.tar = True
-    runner.pipeline_step_config.TRACKER_CONFIG_FILE = None
+    runner.pipeline.step.TRACKER_CONFIG_FILE = None
     with pytest.raises(
         ConfigError,
         match="Tarring requested but there is no tracker config file",
     ):
-        runner._check_tar_conditions()
+        check_archive_config(
+            runner.tar, runner.pipeline.step, lambda: runner.pipeline.tracker
+        )
 
 
 def test_check_tar_conditions_no_dir(runner: ProcessingRunner, tmp_path: Path):
     runner.tar = True
-    runner.pipeline_step_config.TRACKER_CONFIG_FILE = tmp_path  # not used
-    runner.tracker_config = TrackerConfig(
+    runner.pipeline.step.TRACKER_CONFIG_FILE = tmp_path  # not used
+    runner.pipeline.tracker = TrackerConfig(
         PATHS=[tmp_path], PARTICIPANT_SESSION_DIR=None
     )
     with pytest.raises(
         ConfigError,
         match="Tarring requested but no participant-session directory specified",
     ):
-        runner._check_tar_conditions()
+        check_archive_config(
+            runner.tar, runner.pipeline.step, lambda: runner.pipeline.tracker
+        )
 
 
 def test_check_tar_conditions_no_tar(runner: ProcessingRunner):
     runner.tar = False
-    runner._check_tar_conditions()
+    check_archive_config(
+        runner.tar, runner.pipeline.step, lambda: runner.pipeline.tracker
+    )
 
 
 @pytest.mark.parametrize("dpath_type", [Path, str])
@@ -260,12 +274,7 @@ def test_tar_directory(tmp_path: Path, dpath_type):
         fpath.parent.mkdir(parents=True, exist_ok=True)
         fpath.touch()
 
-    runner = ProcessingRunner(
-        dpath_root=tmp_path / "my_dataset",
-        pipeline_name="dummy_pipeline",
-        pipeline_version="1.0.0",
-    )
-    fpath_tarred = runner.tar_directory(dpath_type(dpath_to_tar))
+    fpath_tarred = tar_directory(dpath_type(dpath_to_tar))
 
     assert fpath_tarred == dpath_to_tar.with_suffix(".tar")
     assert fpath_tarred.exists()
@@ -293,10 +302,10 @@ def test_tar_directory_failure(
     fpath_to_tar.touch()
 
     mocked_is_tarfile = mocker.patch(
-        "nipoppy.workflows.processing_runner.is_tarfile", return_value=False
+        "nipoppy.workflows.services.archive.is_tarfile", return_value=False
     )
 
-    fpath_tarred = runner.tar_directory(dpath_to_tar)
+    fpath_tarred = tar_directory(dpath_to_tar)
 
     assert fpath_tarred.exists()
     mocked_is_tarfile.assert_called_once()
@@ -308,7 +317,7 @@ def test_tar_directory_warning_not_found(runner: ProcessingRunner):
     with pytest.raises(
         FileOperationError, match="Not tarring .* since it does not exist"
     ):
-        runner.tar_directory("invalid_path")
+        tar_directory("invalid_path")
 
 
 def test_tar_directory_warning_not_dir(runner: ProcessingRunner, tmp_path: Path):
@@ -318,7 +327,7 @@ def test_tar_directory_warning_not_dir(runner: ProcessingRunner, tmp_path: Path)
     with pytest.raises(
         FileOperationError, match="Not tarring .* since it is not a directory"
     ):
-        runner.tar_directory(fpath_to_tar)
+        tar_directory(fpath_to_tar)
 
 
 @pytest.mark.parametrize(
@@ -500,11 +509,10 @@ def test_get_participants_sessions_to_run(
 ):
     participant_id = None
     session_id = None
-    runner.pipeline_step = pipeline_step
-    runner.participant_id = participant_id
-    runner.session_id = session_id
+    runner.pipeline.step_name = pipeline_step
+    runner.selection = SelectionOptions(participant_id, session_id)
 
-    runner.curation_status_table = CurationStatusTable().add_or_update_records(
+    runner.dataset.curation_status_table = CurationStatusTable().add_or_update_records(
         records=[
             {
                 CurationStatusTable.col_participant_id: data[0],
@@ -530,26 +538,22 @@ def test_get_participants_sessions_to_run(
                 ProcessingStatusTable.col_pipeline_step,
                 ProcessingStatusTable.col_status,
             ],
-        ).validate().save_with_backup(runner.study.layout.fpath_processing_status)
-
-    assert [
-        tuple(x)
-        for x in runner.get_participants_sessions_to_run(
-            participant_id=participant_id, session_id=session_id
+        ).validate().save_with_backup(
+            runner.dataset.study.layout.fpath_processing_status
         )
-    ] == expected
+
+    assert list(runner.select_candidates()) == expected
 
 
 def test_run_multiple(runner: ProcessingRunner):
     participant_id = None
     session_id = None
-    runner.participant_id = participant_id
-    runner.session_id = session_id
+    runner.selection = SelectionOptions(participant_id, session_id)
 
     runner.run_setup()
     runner.run_main()
 
-    bids_layout = BIDSLayout(database_path=runner.dpath_pipeline_bids_db)
+    bids_layout = BIDSLayout(database_path=runner.workspace.bids_db)
     assert not len(bids_layout.get(extension=".nii.gz")) == 0
 
 
@@ -563,23 +567,27 @@ def test_run_single_pybids_db(
     session_id = "1"
 
     # Set GENERATE_PYBIDS_DATABASE
-    runner.pipeline_step_config.GENERATE_PYBIDS_DATABASE = generate_pybids_database
+    runner.pipeline.step.GENERATE_PYBIDS_DATABASE = generate_pybids_database
 
     # Mock the set_up_bids_db method
-    mocked_set_up_bids_db = mocker.patch.object(runner, "set_up_bids_db")
+    mocked_set_up_bids_db = mocker.patch(
+        "nipoppy.workflows.processing_runner.build_bids_db"
+    )
 
     # Mock launch_boutiques_run to avoid issues with bosh trying to launch Docker
-    mocker.patch.object(runner, "launch_boutiques_run")
+    mocker.patch.object(runner, "execute_pipeline")
 
     # Call run_single
-    runner.run_single(participant_id=participant_id, session_id=session_id)
+    runner.execute_item(WorkItem(participant_id, session_id))
 
     # Assert set_up_bids_db was called or not called as expected
     if generate_pybids_database:
         mocked_set_up_bids_db.assert_called_once_with(
-            dpath_pybids_db=runner.dpath_pipeline_bids_db,
-            participant_id=participant_id,
-            session_id=session_id,
+            runner.dataset.study.layout.dpath_bids,
+            runner.workspace.bids_db,
+            runner.pipeline.ignore_patterns,
+            participant_id,
+            session_id,
         )
     else:
         mocked_set_up_bids_db.assert_not_called()
@@ -589,24 +597,27 @@ def test_run_single_bids_path_injection_with_pybids_database(
     runner: ProcessingRunner,
     mocker: pytest_mock.MockFixture,
 ):
-    runner.pipeline_step_config.GENERATE_PYBIDS_DATABASE = True
+    runner.pipeline.step.GENERATE_PYBIDS_DATABASE = True
 
     mocked_bids_layout = mocker.Mock()
-    mocker.patch.object(runner, "set_up_bids_db", return_value=mocked_bids_layout)
+    mocker.patch(
+        "nipoppy.workflows.processing_runner.build_bids_db",
+        return_value=mocked_bids_layout,
+    )
 
     mocked_get_bids_paths_to_inject = mocker.patch(
-        "nipoppy.workflows.processing_runner._get_bids_paths_to_inject",
+        "nipoppy.workflows.processing_runner.get_bids_paths_to_inject",
         return_value={"key1": "path1", "key2": "path2"},
     )
 
     # mock the Boutiques run outcome
-    mocked_launch_boutiques_run = mocker.patch.object(runner, "launch_boutiques_run")
+    mocked_launch_boutiques_run = mocker.patch.object(runner, "execute_pipeline")
 
-    runner.run_single(participant_id="01", session_id="1")
+    runner.execute_item(WorkItem("01", "1"))
 
     mocked_get_bids_paths_to_inject.assert_called_once_with(
         bids_layout=mocked_bids_layout,
-        injection_map=runner.pipeline_config.BIDS_PATH_INJECTION_MAP,
+        injection_map=runner.pipeline.config.BIDS_PATH_INJECTION_MAP,
     )
 
     launch_boutiques_run_kwargs = mocked_launch_boutiques_run.call_args[1]
@@ -619,20 +630,23 @@ def test_run_single_bids_path_injection_no_pybids_database(
     runner: ProcessingRunner,
     mocker: pytest_mock.MockFixture,
 ):
-    runner.pipeline_step_config.GENERATE_PYBIDS_DATABASE = False
+    runner.pipeline.step.GENERATE_PYBIDS_DATABASE = False
 
     mocked_bids_layout = mocker.Mock()
-    mocker.patch.object(runner, "set_up_bids_db", return_value=mocked_bids_layout)
+    mocker.patch(
+        "nipoppy.workflows.processing_runner.build_bids_db",
+        return_value=mocked_bids_layout,
+    )
 
     mocked_get_bids_paths_to_inject = mocker.patch(
-        "nipoppy.workflows.processing_runner._get_bids_paths_to_inject",
+        "nipoppy.workflows.processing_runner.get_bids_paths_to_inject",
         return_value={"key1": "path1", "key2": "path2"},
     )
 
     # mock the Boutiques run outcome
-    mocker.patch.object(runner, "launch_boutiques_run")
+    mocker.patch.object(runner, "execute_pipeline")
 
-    runner.run_single(participant_id="01", session_id="1")
+    runner.execute_item(WorkItem("01", "1"))
 
     mocked_get_bids_paths_to_inject.assert_not_called()
 
@@ -648,45 +662,47 @@ def test_run_single_tar(
     runner.tar = tar
 
     # mock the parts of run_single that are not relevant for this test
-    mocker.patch.object(runner, "set_up_bids_db")
+    mocker.patch("nipoppy.workflows.processing_runner.build_bids_db")
 
     # mock the Boutiques run outcome
     exception_message = "launch_boutiques_run failed"
     mocker.patch.object(
         runner,
-        "launch_boutiques_run",
+        "execute_pipeline",
         side_effect=None if boutiques_success else RuntimeError(exception_message),
     )
 
     # mock tar_directory method (will check if/how this is called)
-    mocked_tar_directory = mocker.patch.object(runner, "tar_directory")
+    mocked_tar_directory = mocker.patch(
+        "nipoppy.workflows.processing_runner.tar_directory"
+    )
 
     participant_id = "01"
     session_id = "1"
-    runner.tracker_config = TrackerConfig(
+    runner.pipeline.tracker = TrackerConfig(
         PATHS=["fake_path"],  # not used
         PARTICIPANT_SESSION_DIR=(
             "[[NIPOPPY_PARTICIPANT_ID]]_[[NIPOPPY_BIDS_SESSION_ID]]"
         ),
     )
     try:
-        runner.run_single(participant_id=participant_id, session_id=session_id)
+        runner.execute_item(WorkItem(participant_id, session_id))
     except RuntimeError as exception:
         if str(exception) != exception_message:
             raise exception
 
     if tar and boutiques_success:
         mocked_tar_directory.assert_called_once_with(
-            runner.dpath_pipeline_output / f"{participant_id}_ses-{session_id}"
+            runner.output / f"{participant_id}_ses-{session_id}", dry_run=runner.dry_run
         )
     else:
         mocked_tar_directory.assert_not_called()
 
 
 def test_run_missing_container_raises_error(runner: ProcessingRunner):
-    runner.study.manifest = Manifest()
+    runner.dataset.study.manifest = Manifest()
 
-    runner.pipeline_config.CONTAINER_INFO.FILE = Path("does_not_exist.sif")
+    runner.pipeline.config.CONTAINER_INFO.FILE = Path("does_not_exist.sif")
     with pytest.raises(
         FileOperationError, match="No container image file found for pipeline"
     ):
@@ -698,11 +714,7 @@ def test_run_main_write_subcohort(
     mocker: pytest_mock.MockFixture,
     tmp_path: Path,
 ):
-    mocked_write_subcohort_to_file = mocker.patch.object(
-        runner, "_write_subcohort_to_file"
-    )
-    runner.write_subcohort = tmp_path / "mocked"
-
+    mocked_write = mocker.patch("nipoppy.workflows.execution.write_subcohort")
+    runner.execution = replace(runner.execution, write_subcohort=tmp_path / "mocked")
     runner.run_main()
-
-    mocked_write_subcohort_to_file.assert_called_once()
+    mocked_write.assert_called_once()

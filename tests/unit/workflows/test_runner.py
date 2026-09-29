@@ -2,6 +2,7 @@
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,12 +19,23 @@ from nipoppy.env import ContainerCommandEnum
 from nipoppy.exceptions import ConfigError
 from nipoppy.pipeline_validation import check_pipeline_bundle
 from nipoppy.utils.utils import get_pipeline_tag
-from nipoppy.workflows.processing_runner import ProcessingRunner
-from nipoppy.workflows.runner import Runner
-from nipoppy.workflows.services.boutiques import inject_container_image
-from nipoppy.workflows.services.hpc import HPCJob, SubmissionPaths, SubmissionResult
+from nipoppy.workflows.execution import PipelineExecutionWorkflow as Runner
+from nipoppy.workflows.factories import create_processing_workflow
+from nipoppy.workflows.services.boutiques import (
+    execute_invocation,
+    inject_container_image,
+    prepare_container,
+    prepare_invocation,
+    run_bosh_launch,
+    run_bosh_simulate,
+)
+from nipoppy.workflows.services.hpc import (
+    HPCJob,
+    SubmissionPaths,
+    SubmissionResult,
+    load_hpc_config,
+)
 from tests.conftest import (
-    _set_up_substitution_testing,
     create_empty_dataset,
     create_pipeline_config_files,
     get_config,
@@ -33,16 +45,15 @@ from tests.conftest import (
 
 @pytest.fixture(scope="function")
 def runner(study, tmp_path: Path, mocker: pytest_mock.MockFixture) -> Runner:
-    runner = ProcessingRunner(
+    runner = create_processing_workflow(
         dpath_root=study.layout.dpath_root,
         pipeline_name="dummy_pipeline",
         pipeline_version="1.0.0",
     )
-    runner.study = study
 
-    create_empty_dataset(runner.study.layout.dpath_root)
+    create_empty_dataset(runner.dataset.study.layout.dpath_root)
 
-    runner.study.config = get_config(
+    runner.dataset.study.config = get_config(
         container_config={
             "COMMAND": "apptainer",  # mocked
             "ARGS": ["--flag1"],
@@ -61,7 +72,7 @@ def runner(study, tmp_path: Path, mocker: pytest_mock.MockFixture) -> Runner:
     fpath_container.touch()
 
     create_pipeline_config_files(
-        runner.study.layout.dpath_pipelines,
+        runner.dataset.study.layout.dpath_pipelines,
         processing_pipelines=[
             {
                 "NAME": "dummy_pipeline",
@@ -114,34 +125,34 @@ def runner(study, tmp_path: Path, mocker: pytest_mock.MockFixture) -> Runner:
         "arg1": "[[NIPOPPY_PARTICIPANT_ID]] [[NIPOPPY_BIDS_SESSION_ID]]",
         "arg2": 10,
     }
-    (runner.dpath_pipeline_bundle / fname_descriptor).write_text(json.dumps(descriptor))
-    (runner.dpath_pipeline_bundle / fname_invocation).write_text(json.dumps(invocation))
+    (runner.pipeline.bundle / fname_descriptor).write_text(json.dumps(descriptor))
+    (runner.pipeline.bundle / fname_invocation).write_text(json.dumps(invocation))
 
     participants_and_sessions = {"01": ["1", "2", "3"], "02": ["1"]}
-    create_empty_dataset(runner.study.layout.dpath_root)
+    create_empty_dataset(runner.dataset.study.layout.dpath_root)
     manifest = prepare_dataset(
         participants_and_sessions_manifest=participants_and_sessions,
         participants_and_sessions_bidsified=participants_and_sessions,
-        dpath_bidsified=runner.study.layout.dpath_bids,
+        dpath_bidsified=runner.dataset.study.layout.dpath_bids,
     )
-    manifest.save_with_backup(runner.study.layout.fpath_manifest)
+    manifest.save_with_backup(runner.dataset.study.layout.fpath_manifest)
     return runner
 
 
 def test_run_setup_validates_pipeline_bundle(
     runner: Runner, mocker: pytest_mock.MockFixture
 ):
-    runner.pipeline_version = None
+    runner.pipeline.version = None
     mocked_check_pipeline_bundle = mocker.patch(
-        "nipoppy.workflows.runner.check_pipeline_bundle",
+        "nipoppy.workflows.execution.check_pipeline_bundle",
         wraps=check_pipeline_bundle,
     )
 
     runner.run_setup()
 
-    assert runner.pipeline_version == "1.0.0"
+    assert runner.pipeline.version == "1.0.0"
     mocked_check_pipeline_bundle.assert_called_once_with(
-        runner.dpath_pipeline_bundle, strict=False
+        runner.pipeline.bundle, strict=False
     )
 
 
@@ -150,7 +161,7 @@ def test_run_validation_error_prevents_execution(
 ):
     error = ConfigError("Invalid pipeline bundle")
     mocker.patch(
-        "nipoppy.workflows.runner.check_pipeline_bundle",
+        "nipoppy.workflows.execution.check_pipeline_bundle",
         side_effect=error,
     )
     mocked_run_main = mocker.patch.object(runner, "run_main")
@@ -171,87 +182,79 @@ def test_hpc_config(
     fpath_hpc_config = tmp_path / "hpc_config.json"
     fpath_hpc_config.write_text(json.dumps(hpc_config_data))
 
-    runner.pipeline_step_config.HPC_CONFIG_FILE = fpath_hpc_config.name
-    runner.dpath_pipeline_bundle = fpath_hpc_config.parent
+    runner.pipeline.step.HPC_CONFIG_FILE = fpath_hpc_config.name
+    runner.pipeline.bundle = fpath_hpc_config.parent
 
-    mocked_process_template_json = _set_up_substitution_testing(runner, mocker)
+    mocked_process_template_json = mocker.patch.object(
+        runner.templates, "render", wraps=runner.templates.render
+    )
 
-    assert isinstance(runner.hpc_config, HpcConfig)
+    assert isinstance(
+        load_hpc_config(
+            runner.pipeline.step, runner.pipeline.bundle, runner.templates.render
+        ),
+        HpcConfig,
+    )
 
     # make sure substitutions are processed
     mocked_process_template_json.assert_called_once()
 
 
 def test_hpc_config_no_file(runner: Runner):
-    runner.pipeline_step_config.HPC_CONFIG_FILE = None
-    assert runner.hpc_config == HpcConfig()
+    runner.pipeline.step.HPC_CONFIG_FILE = None
+    assert (
+        load_hpc_config(
+            runner.pipeline.step, runner.pipeline.bundle, runner.templates.render
+        )
+        == HpcConfig()
+    )
 
 
 def test_hpc_runner(runner: Runner):
-    assert runner.hpc_runner.subcommand == runner.subcommand
+    assert runner.scheduler.subcommand == runner.name
 
 
 def test_submit_hpc_job(runner: Runner, mocker: pytest_mock.MockFixture):
-
+    pairs = [("participant1", "session1"), ("participant2", "session2")]
+    runner.execution = replace(runner.execution, hpc="slurm")
+    mocker.patch.object(runner, "select_candidates", return_value=pairs)
     mocker.patch.object(
-        runner,
-        "_generate_cli_command_for_hpc",
-        side_effect=(
-            lambda participant_id, session_id: [
-                "echo",
-                f"{participant_id}, {session_id}",
-            ]
-        ),
+        runner.scheduler,
+        "generate_cli_command",
+        side_effect=lambda participant, session, **kwargs: [
+            "echo",
+            f"{participant}, {session}",
+        ],
     )
-
-    n_jobs_submitted = 1
     mocked_submit = mocker.patch.object(
-        runner.hpc_runner,
-        "submit_jobs",
-        return_value=SubmissionResult(2, n_jobs_submitted),
+        runner.scheduler, "submit_jobs", return_value=SubmissionResult(2, 1)
     )
-
-    participant_ids = ["participant1", "participant2"]
-    session_ids = ["session1", "session2"]
-    participants_sessions = list(zip(participant_ids, session_ids))
-    runner._submit_hpc_job(participants_sessions)
-
+    runner.run_main()
     mocked_submit.assert_called_once_with(
         [
             HPCJob(("echo", f"{participant}, {session}"), participant, session)
-            for participant, session in participants_sessions
+            for participant, session in pairs
         ],
         get_pipeline_tag(
-            runner.pipeline_name,
-            runner.pipeline_version,
-            runner.pipeline_step,
-            runner.participant_id,
-            runner.session_id,
+            runner.pipeline.name, runner.pipeline.version, runner.pipeline.step_name
         ),
         SubmissionPaths(
-            runner.dpath_pipeline_work,
-            runner.study.layout.dpath_logs / runner.dname_hpc_logs,
-            runner.fname_hpc_error,
-            runner.fname_job_script,
+            runner.workspace.work, runner.dataset.study.layout.dpath_logs / "hpc"
         ),
         runner.dry_run,
     )
-
-    assert runner.n_success == n_jobs_submitted
-    assert runner.n_total == len(participants_sessions)
+    assert runner.result.n_success == 1
+    assert runner.result.n_total == 2
 
 
 def test_run_main_hpc(mocker: pytest_mock.MockFixture, runner: Runner):
-    mocker.patch("os.makedirs", mocker.MagicMock())
-    mocked_submit_hpc_job = mocker.patch.object(runner, "_submit_hpc_job")
-
-    runner.hpc = "exists"
-
+    runner.execution = replace(runner.execution, hpc="slurm")
+    mocked_submit = mocker.patch.object(
+        runner.scheduler, "submit_jobs", return_value=SubmissionResult(4, 4)
+    )
     runner.run_main()
-
-    mocked_submit_hpc_job.assert_called_once()
-
-    assert list(mocked_submit_hpc_job.call_args[0][0]) == [
+    jobs = mocked_submit.call_args[0][0]
+    assert [(job.participant_id, job.session_id) for job in jobs] == [
         ("01", "1"),
         ("01", "2"),
         ("01", "3"),
@@ -266,21 +269,9 @@ def test_run_main_hpc(mocker: pytest_mock.MockFixture, runner: Runner):
         (False, None),
     ],
 )
-def test_generate_cli_command_for_hpc(
-    tar: bool,
-    extra_flags: list[str] | None,
-    runner: Runner,
-    mocker: pytest_mock.MockFixture,
-):
-    mocked_generate_cli_command = mocker.patch.object(
-        runner.hpc_runner,
-        "generate_cli_command",
-    )
+def test_generate_cli_command_for_hpc(tar, extra_flags, runner: Runner, mocker):
     runner.tar = tar
-    runner._generate_cli_command_for_hpc("p01", "s01")
-    mocked_generate_cli_command.assert_called_once_with(
-        participant_id="p01", session_id="s01", extra_flags=extra_flags
-    )
+    assert runner.hpc_extra_flags() == (extra_flags or [])
 
 
 @pytest.mark.parametrize(
@@ -302,7 +293,7 @@ def test_inject_container_image(
     expected_image: str,
     expected_type: str,
 ):
-    descriptor = inject_container_image(descriptor=runner.descriptor, uri=uri)
+    descriptor = inject_container_image(descriptor=runner.pipeline.descriptor, uri=uri)
     assert "container-image" in descriptor
     assert descriptor["container-image"]["image"] == expected_image
     assert descriptor["container-image"]["type"] == expected_type
@@ -312,7 +303,7 @@ def test_inject_container_image_invalid_uri(
     runner: Runner,
     caplog: pytest.LogCaptureFixture,
 ):
-    inject_container_image(descriptor=runner.descriptor, uri="invalid_uri")
+    inject_container_image(descriptor=runner.pipeline.descriptor, uri="invalid_uri")
     assert "Failed to parse CONTAINER_INFO.URI" in caplog.text
 
 
@@ -320,15 +311,15 @@ def test_inject_container_image_invalid_uri(
 def test_launch_boutiques_run(
     simulate, runner: Runner, mocker: pytest_mock.MockFixture
 ):
-    runner.simulate = simulate
+    runner.execution = replace(runner.execution, simulate=simulate)
 
     participant_id = "01"
     session_id = "BL"
 
-    mocked_run_command = mocker.patch("nipoppy.workflows.runner._run_command")
+    mocked_run_command = mocker.patch("nipoppy.workflows.execution._run_command")
 
-    descriptor_str, invocation_str = runner.launch_boutiques_run(
-        participant_id, session_id
+    descriptor_str, invocation_str = launch_boutiques_run(
+        runner, participant_id, session_id
     )
 
     assert "[[NIPOPPY_DPATH_BIDS]]" not in descriptor_str
@@ -383,16 +374,17 @@ def test_launch_boutiques_run_bosh_opts(
     mocker: pytest_mock.MockFixture,
     caplog: pytest.LogCaptureFixture,
 ):
-    runner.simulate = simulate
+    runner.execution = replace(runner.execution, simulate=simulate)
     runner.verbose = verbose
-    runner.descriptor["command-line"] = "echo [ARG1] [ARG2]"
+    runner.pipeline.descriptor["command-line"] = "echo [ARG1] [ARG2]"
 
     participant_id = "01"
     session_id = "BL"
 
-    mocked_run_command = mocker.patch("nipoppy.workflows.runner._run_command")
+    mocked_run_command = mocker.patch("nipoppy.workflows.execution._run_command")
 
-    runner.launch_boutiques_run(
+    launch_boutiques_run(
+        runner,
         participant_id,
         session_id,
         container_handler=container_handler,
@@ -418,16 +410,17 @@ def test_launch_boutiques_run_bosh_no_container_image(
     runner: Runner,
     mocker: pytest_mock.MockFixture,
 ):
-    runner.descriptor["command-line"] = "echo [ARG1] [ARG2]"
-    runner.descriptor.pop("container-image")
-    runner.pipeline_config.CONTAINER_INFO.URI = None
+    runner.pipeline.descriptor["command-line"] = "echo [ARG1] [ARG2]"
+    runner.pipeline.descriptor.pop("container-image")
+    runner.pipeline.config.CONTAINER_INFO.URI = None
 
     participant_id = "01"
     session_id = "BL"
 
-    mocked_run_command = mocker.patch("nipoppy.workflows.runner._run_command")
+    mocked_run_command = mocker.patch("nipoppy.workflows.execution._run_command")
 
-    runner.launch_boutiques_run(
+    launch_boutiques_run(
+        runner,
         participant_id,
         session_id,
         container_handler=None,
@@ -442,22 +435,22 @@ def test_launch_boutiques_run_container_image(
     mocker: pytest_mock.MockFixture,
 ):
     # remove [[NIPOPPY_DPATH_BIDS]]
-    runner.descriptor["command-line"] = "echo [ARG1] [ARG2]"
+    runner.pipeline.descriptor["command-line"] = "echo [ARG1] [ARG2]"
 
-    del runner.descriptor["container-image"]
+    del runner.pipeline.descriptor["container-image"]
 
-    original_descriptor = copy.deepcopy(runner.descriptor)
+    original_descriptor = copy.deepcopy(runner.pipeline.descriptor)
 
     mocked_inject_container_image = mocker.patch(
         "nipoppy.workflows.services.boutiques.inject_container_image",
         wraps=inject_container_image,
     )
 
-    runner.launch_boutiques_run(participant_id="01", session_id="BL")
+    launch_boutiques_run(runner, participant_id="01", session_id="BL")
 
     mocked_inject_container_image.assert_called_with(
         original_descriptor,
-        runner.pipeline_config.CONTAINER_INFO.URI,
+        runner.pipeline.config.CONTAINER_INFO.URI,
     )
 
 
@@ -466,28 +459,28 @@ def test_launch_boutiques_run_no_container_image(
     mocker: pytest_mock.MockFixture,
 ):
     # remove [[NIPOPPY_DPATH_BIDS]]
-    runner.descriptor["command-line"] = "echo [ARG1] [ARG2]"
+    runner.pipeline.descriptor["command-line"] = "echo [ARG1] [ARG2]"
 
     mocked_inject_container_image = mocker.patch(
         "nipoppy.workflows.services.boutiques.inject_container_image",
         wraps=inject_container_image,
     )
 
-    runner.launch_boutiques_run(participant_id="01", session_id="BL")
+    launch_boutiques_run(runner, participant_id="01", session_id="BL")
 
     mocked_inject_container_image.assert_not_called()
 
 
 def test_process_container_config(runner: Runner, tmp_path: Path):
     bind_path = tmp_path / "to_bind"
-    container_command, container_handler = runner.process_container_config(
-        participant_id="01", session_id="BL", bind_paths=[bind_path]
+    container_command, container_handler = process_container_config(
+        runner, participant_id="01", session_id="BL", bind_paths=[bind_path]
     )
 
     # check that the subcommand 'exec' from the Boutiques container config is used
     # note: the container command in the config is "echo" because otherwise the
     # check for the container command fails if Singularity/Apptainer is not on the PATH
-    root_path = runner.study.layout.dpath_root.resolve()
+    root_path = runner.dataset.study.layout.dpath_root.resolve()
     assert container_command.startswith("apptainer exec")
     assert f"--bind {root_path}:{root_path}:rw " in container_command
     assert container_command.endswith(
@@ -515,8 +508,8 @@ def test_process_container_config_no_bind_cwd(
 ):
     bind_path = tmp_path / "to_bind"
     mocker.patch("pathlib.Path.cwd", return_value=bind_path)
-    container_command, _ = runner.process_container_config(
-        participant_id="01", session_id="BL", bind_paths=[bind_path]
+    container_command, _ = process_container_config(
+        runner, participant_id="01", session_id="BL", bind_paths=[bind_path]
     )
 
     assert (
@@ -527,4 +520,44 @@ def test_process_container_config_no_bind_cwd(
 
 def test_process_container_config_no_bindpaths(runner: Runner):
     # smoke test for no bind paths
-    runner.process_container_config(participant_id="01", session_id="BL")
+    process_container_config(runner, participant_id="01", session_id="BL")
+
+
+def launch_boutiques_run(
+    runner, participant_id, session_id, container_handler=None, **kwargs
+):
+    """Exercise preparation and execution without automatic domain bind assembly."""
+    from nipoppy.workflows.execution import _run_command
+
+    prepared = prepare_invocation(
+        runner.pipeline.descriptor,
+        runner.pipeline.invocation,
+        runner.templates.render,
+        runner.pipeline.config.CONTAINER_INFO.URI,
+        lambda: runner.pipeline.container_file,
+        participant_id,
+        session_id,
+        container_handler=container_handler,
+        verbose=runner.verbose,
+        **kwargs,
+    )
+    execute_invocation(
+        prepared,
+        run_bosh_simulate if runner.execution.simulate else run_bosh_launch,
+        _run_command,
+        runner.dry_run,
+    )
+    return prepared.descriptor_str, prepared.invocation_str
+
+
+def process_container_config(runner, participant_id, session_id, bind_paths=None):
+    """Exercise the container module using explicit workflow dependencies."""
+    return prepare_container(
+        runner.pipeline.step.get_container_config(),
+        runner.pipeline.boutiques_config,
+        runner.templates.render,
+        runner.dataset.study.layout.dpath_root,
+        participant_id,
+        session_id,
+        bind_paths,
+    )

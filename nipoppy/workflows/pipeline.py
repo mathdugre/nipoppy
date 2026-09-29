@@ -18,9 +18,6 @@ from nipoppy.config.pipeline import (
 from nipoppy.config.pipeline_step import AnalysisLevelType, ProcPipelineStepConfig
 from nipoppy.config.tracker import TrackerConfig
 from nipoppy.env import (
-    BIDS_SESSION_PREFIX,
-    BIDS_SUBJECT_PREFIX,
-    FAKE_SESSION_ID,
     PipelineTypeEnum,
     StrOrPathLike,
 )
@@ -31,10 +28,8 @@ from nipoppy.exceptions import (
 from nipoppy.logger import get_logger
 from nipoppy.utils import fileops
 from nipoppy.utils.bids import (
-    add_pybids_ignore_patterns,
     check_participant_id,
     check_session_id,
-    create_bids_db,
 )
 from nipoppy.utils.utils import (
     get_pipeline_tag,
@@ -49,6 +44,7 @@ from nipoppy.workflows.services.artifacts import (
     load_pybids_ignore_patterns,
     load_tracker_config,
 )
+from nipoppy.workflows.services.bids import build_bids_db
 from nipoppy.workflows.services.boutiques import (
     load_boutiques_config,
     resolve_container_file,
@@ -68,7 +64,7 @@ from nipoppy.workflows.services.execution import (
 from nipoppy.workflows.services.templates import TemplateRenderer
 
 if TYPE_CHECKING:
-    import bids
+    pass
 try:
     import joblib  # noqa: F401 - retain availability checks until Tracker migration
 
@@ -337,58 +333,15 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         )
         return renderer.render(template_json, **kwargs)
 
-    def set_up_bids_db(
-        self,
-        dpath_pybids_db: StrOrPathLike,
-        participant_id: str | None = None,
-        session_id: str | None = None,
-    ) -> bids.BIDSLayout:
-        """Set up the BIDS database."""
-        dpath_pybids_db: Path = Path(dpath_pybids_db)
-
-        pybids_ignore_patterns = self.pybids_ignore_patterns.copy()
-
-        if participant_id is not None:
-            add_pybids_ignore_patterns(
-                current=pybids_ignore_patterns,
-                new=f"^(?!/{BIDS_SUBJECT_PREFIX}({participant_id}))",
-            )
-        if (session_id is not None) and (session_id != FAKE_SESSION_ID):
-            add_pybids_ignore_patterns(
-                current=pybids_ignore_patterns,
-                new=f".*?/{BIDS_SESSION_PREFIX}(?!{session_id})",
-            )
-
-        logger.info(
-            f"Building BIDSLayout with {len(pybids_ignore_patterns)} ignore "
-            f"patterns: {pybids_ignore_patterns}"
+    def set_up_bids_db(self, dpath_pybids_db, participant_id=None, session_id=None):
+        """Build a filtered database using the focused PyBIDS module."""
+        return build_bids_db(
+            self.study.layout.dpath_bids,
+            dpath_pybids_db,
+            self.pybids_ignore_patterns,
+            participant_id,
+            session_id,
         )
-
-        if dpath_pybids_db.exists() and list(dpath_pybids_db.iterdir()):
-            logger.warning(
-                f"Overwriting existing BIDS database directory: {dpath_pybids_db}"
-            )
-
-        logger.debug(f"Path to BIDS data: {self.study.layout.dpath_bids}")
-        bids_layout: bids.BIDSLayout = create_bids_db(
-            dpath_bids=self.study.layout.dpath_bids,
-            dpath_pybids_db=dpath_pybids_db,
-            ignore_patterns=pybids_ignore_patterns,
-            reset_database=True,
-        )
-
-        # list all the files in BIDSLayout
-        # since we are selecting for specific a specific subject and
-        # session, there should not be too many files
-        filenames = bids_layout.get(return_type="filename")
-        logger.debug(f"Found {len(filenames)} files in BIDS database:")
-        for filename in filenames:
-            logger.debug(filename)
-
-        if len(filenames) == 0:
-            logger.warning("BIDS database is empty")
-
-        return bids_layout
 
     def check_pipeline_version(self):
         """Set the pipeline version based on the config if it is not given."""
