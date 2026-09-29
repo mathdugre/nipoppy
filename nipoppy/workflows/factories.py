@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from nipoppy.env import StrOrPathLike
+from nipoppy.env import PipelineTypeEnum, StrOrPathLike
+from nipoppy.workflows.services.cohort import SelectionOptions
+from nipoppy.workflows.services.models import ExecutionOptions, PipelineRequest
 
 if TYPE_CHECKING:
     from nipoppy.workflows.bids_conversion import BIDSificationRunner
@@ -70,14 +72,11 @@ def create_bidsification_workflow(
     """Construct the bidsification workflow from normalized CLI parameters."""
     from nipoppy.workflows.bids_conversion import BIDSificationRunner
 
-    return BIDSificationRunner(
-        dpath_root=dpath_root,
-        pipeline_name=pipeline_name,
-        pipeline_version=pipeline_version,
-        pipeline_step=pipeline_step,
-        participant_id=participant_id,
-        session_id=session_id,
-        use_subcohort=use_subcohort,
+    request = PipelineRequest(
+        PipelineTypeEnum.BIDSIFICATION, pipeline_name, pipeline_version, pipeline_step
+    )
+    selection = SelectionOptions(participant_id, session_id, use_subcohort)
+    execution = ExecutionOptions(
         simulate=simulate,
         keep_workdir=keep_workdir,
         hpc=hpc,
@@ -85,6 +84,11 @@ def create_bidsification_workflow(
         fpath_layout=fpath_layout,
         verbose=verbose,
         dry_run=dry_run,
+    )
+    return BIDSificationRunner(
+        **create_pipeline_dependencies(
+            dpath_root, "bidsify", request, selection, execution
+        )
     )
 
 

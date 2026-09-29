@@ -205,6 +205,7 @@ def bosh_commands(monkeypatch):
         return 0
 
     monkeypatch.setattr("nipoppy.workflows.runner._run_command", record)
+    monkeypatch.setattr("nipoppy.workflows.execution._run_command", record)
     return commands
 
 
@@ -322,6 +323,7 @@ def test_cli_item_failures_continue_and_preserve_status(
         return 0
 
     monkeypatch.setattr("nipoppy.workflows.runner._run_command", execute)
+    monkeypatch.setattr("nipoppy.workflows.execution._run_command", execute)
     result = _invoke(layout, command)
     assert result.exit_code == (
         ReturnCode.PARTIAL_SUCCESS if failures else ReturnCode.SUCCESS
@@ -493,6 +495,7 @@ def test_processing_archives_only_after_real_launch(
         return 0
 
     monkeypatch.setattr("nipoppy.workflows.runner._run_command", execute)
+    monkeypatch.setattr("nipoppy.workflows.execution._run_command", execute)
     result = _invoke(layout, "process", "--tar", *(["--simulate"] if simulate else []))
     assert result.exit_code == ReturnCode.SUCCESS, result.output
     for participant, session in ELIGIBLE["process"]:
