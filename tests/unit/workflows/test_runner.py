@@ -21,6 +21,7 @@ from nipoppy.utils.utils import get_pipeline_tag
 from nipoppy.workflows.processing_runner import ProcessingRunner
 from nipoppy.workflows.runner import Runner
 from nipoppy.workflows.services.boutiques import inject_container_image
+from nipoppy.workflows.services.hpc import HPCJob, SubmissionPaths, SubmissionResult
 from tests.conftest import (
     _set_up_substitution_testing,
     create_empty_dataset,
@@ -205,7 +206,9 @@ def test_submit_hpc_job(runner: Runner, mocker: pytest_mock.MockFixture):
 
     n_jobs_submitted = 1
     mocked_submit = mocker.patch.object(
-        runner.hpc_runner, "submit", return_value=n_jobs_submitted
+        runner.hpc_runner,
+        "submit_jobs",
+        return_value=SubmissionResult(2, n_jobs_submitted),
     )
 
     participant_ids = ["participant1", "participant2"]
@@ -214,27 +217,24 @@ def test_submit_hpc_job(runner: Runner, mocker: pytest_mock.MockFixture):
     runner._submit_hpc_job(participants_sessions)
 
     mocked_submit.assert_called_once_with(
-        job_name=get_pipeline_tag(
+        [
+            HPCJob(("echo", f"{participant}, {session}"), participant, session)
+            for participant, session in participants_sessions
+        ],
+        get_pipeline_tag(
             runner.pipeline_name,
             runner.pipeline_version,
             runner.pipeline_step,
             runner.participant_id,
             runner.session_id,
         ),
-        job_array_commands=[
-            "echo 'participant1, session1'",
-            "echo 'participant2, session2'",
-        ],
-        participant_ids=participant_ids,
-        session_ids=session_ids,
-        dpath_work=runner.dpath_pipeline_work,
-        dpath_hpc_logs=runner.study.layout.dpath_logs / runner.dname_hpc_logs,
-        fname_hpc_error=runner.fname_hpc_error,
-        fname_job_script=runner.fname_job_script,
-        pipeline_name=runner.pipeline_name,
-        pipeline_version=runner.pipeline_version,
-        pipeline_step=runner.pipeline_step,
-        dry_run=runner.dry_run,
+        SubmissionPaths(
+            runner.dpath_pipeline_work,
+            runner.study.layout.dpath_logs / runner.dname_hpc_logs,
+            runner.fname_hpc_error,
+            runner.fname_job_script,
+        ),
+        runner.dry_run,
     )
 
     assert runner.n_success == n_jobs_submitted

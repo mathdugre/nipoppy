@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import getpass
+import shlex
 import sys
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,12 +18,40 @@ from nipoppy.env import PROGRAM_NAME, StrOrPathLike
 from nipoppy.exceptions import LayoutError, WorkflowError
 from nipoppy.logger import get_logger
 from nipoppy.utils import fileops
-from nipoppy.utils.utils import FPATH_HPC_TEMPLATE
+from nipoppy.utils.utils import FPATH_HPC_TEMPLATE, load_json
 
 if TYPE_CHECKING:
     import pandas as pd
 
 logger = get_logger()
+
+
+@dataclass(frozen=True)
+class HPCJob:
+    """A command and its IDs, kept together when queue capacity truncates jobs."""
+
+    command: tuple[str, ...]
+    participant_id: str | None
+    session_id: str | None
+
+
+@dataclass(frozen=True)
+class SubmissionPaths:
+    """Filesystem locations used by one scheduler submission."""
+
+    work: Path
+    logs: Path
+    error_filename: str = "pysqa.err"
+    script_filename: str = "run_queue.sh"
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    """Requested and submitted counts, including dry-run submissions."""
+
+    requested: int
+    submitted: int
+    job_id: str | None = None
 
 
 class HPCRunner:
@@ -185,7 +215,7 @@ class HPCRunner:
 
         return max(0, self.queue_limit - len(df_queue_status))
 
-    def submit(
+    def _submit_array(
         self,
         job_name: str,
         job_array_commands: list,
@@ -199,7 +229,7 @@ class HPCRunner:
         pipeline_version: str,
         pipeline_step: str,
         dry_run: bool = False,
-    ) -> int | None:
+    ) -> SubmissionResult:
         """
         Submit a job to the HPC scheduler.
 
@@ -235,6 +265,7 @@ class HPCRunner:
         int
             The number of jobs submitted
         """
+        n_requested = len(job_array_commands)
         n_available_jobs = self._get_n_available_job_slots()
         job_array_commands = job_array_commands[:n_available_jobs]
         participant_ids = participant_ids[:n_available_jobs]
@@ -242,7 +273,7 @@ class HPCRunner:
 
         # skip if there are no jobs to submit
         if len(job_array_commands) == 0:
-            return 0
+            return SubmissionResult(n_requested, 0)
 
         # Make sure HPC directory exists.
         if not (self.dpath_hpc.exists() and self.dpath_hpc.is_dir()):
@@ -302,4 +333,40 @@ class HPCRunner:
         if job_id is not None:
             logger.info(f"HPC job ID: {job_id}")
 
-        return len(job_array_commands)
+        return SubmissionResult(n_requested, len(job_array_commands), job_id)
+
+    def submit_jobs(
+        self,
+        jobs: list[HPCJob],
+        job_name: str,
+        paths: SubmissionPaths,
+        dry_run: bool = False,
+    ) -> SubmissionResult:
+        """Submit aligned commands and IDs through one structured request."""
+        return self._submit_array(
+            job_name,
+            [shlex.join(job.command) for job in jobs],
+            [job.participant_id for job in jobs],
+            [job.session_id for job in jobs],
+            paths.work,
+            paths.logs,
+            paths.error_filename,
+            paths.script_filename,
+            self.pipeline_name,
+            self.pipeline_version,
+            self.pipeline_step,
+            dry_run,
+        )
+
+    def submit(self, *args, **kwargs) -> int:
+        """Compatibility entry point until callers migrate to structured jobs."""
+        return self._submit_array(*args, **kwargs).submitted
+
+
+def load_hpc_config(step, bundle: Path, render) -> HpcConfig:
+    """Load and render a step's scheduler resource configuration."""
+    if step.HPC_CONFIG_FILE is None:
+        return HpcConfig()
+    path = bundle / step.HPC_CONFIG_FILE
+    logger.info(f"Loading HPC config from {path}")
+    return HpcConfig(**render(load_json(path, allow_json5=True)))
