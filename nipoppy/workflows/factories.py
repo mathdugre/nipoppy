@@ -123,3 +123,54 @@ def create_extraction_workflow(
         verbose=verbose,
         dry_run=dry_run,
     )
+
+
+def create_pipeline_dependencies(dpath_root, name, request, selection, execution):
+    """Assemble explicit dependencies without loading configuration or artifacts."""
+    from nipoppy.workflows.services.artifacts import ResolvedPipeline
+    from nipoppy.workflows.services.dataset import DatasetAccess, open_dataset
+    from nipoppy.workflows.services.paths import PipelineWorkspace
+    from nipoppy.workflows.services.templates import TemplateRenderer
+
+    study = open_dataset(dpath_root, execution.fpath_layout)
+    dataset = DatasetAccess(study, dry_run=execution.dry_run)
+    values = {}
+    templates = TemplateRenderer(
+        lambda: study.config.SUBSTITUTIONS, values, study.layout
+    )
+    pipeline = ResolvedPipeline(study, request, templates.render)
+    workspace = PipelineWorkspace(study.layout, pipeline, selection)
+    values.update(
+        {
+            "name": lambda: name,
+            "subcommand": lambda: name,
+            "dpath_root": lambda: study.layout.dpath_root,
+            "fpath_layout": lambda: execution.fpath_layout,
+            "pipeline_name": lambda: pipeline.name,
+            "pipeline_version": lambda: pipeline.version,
+            "pipeline_step": lambda: pipeline.step_name,
+            "participant_id": lambda: selection.participant_id,
+            "session_id": lambda: selection.session_id,
+            "use_subcohort": lambda: selection.use_subcohort,
+            "write_subcohort": lambda: execution.write_subcohort,
+            "hpc": lambda: execution.hpc,
+            "verbose": lambda: execution.verbose,
+            "dry_run": lambda: execution.dry_run,
+            "simulate": lambda: execution.simulate,
+            "keep_workdir": lambda: execution.keep_workdir,
+            "n_jobs": lambda: execution.n_jobs,
+            "dpath_pipeline_bundle": lambda: pipeline.bundle,
+            "dpath_pipeline_work": lambda: workspace.work,
+            "dpath_pipeline_bids_db": lambda: workspace.bids_db,
+            "fpath_container": lambda: pipeline.container_file,
+        }
+    )
+    return dict(
+        name=name,
+        dataset=dataset,
+        pipeline=pipeline,
+        selection=selection,
+        execution=execution,
+        workspace=workspace,
+        templates=templates,
+    )

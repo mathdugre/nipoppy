@@ -21,7 +21,7 @@ class TemplateRenderer:
 
     def __init__(
         self,
-        substitutions: Mapping[str, str],
+        substitutions: Mapping[str, str] | Callable[[], Mapping[str, str]],
         values: Mapping[str, Callable[[], object]],
         layout,
     ):
@@ -44,7 +44,10 @@ class TemplateRenderer:
         """Render a JSON value, optionally returning its serialized form."""
         if with_substitutions:
             template_json = apply_substitutions_to_json(
-                template_json, self.substitutions
+                template_json,
+                self.substitutions()
+                if callable(self.substitutions)
+                else self.substitutions,
             )
         if participant_id is not None:
             kwargs["participant_id"] = participant_id

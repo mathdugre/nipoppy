@@ -5,17 +5,27 @@ study's runtime substitutions and inherited container configuration.
 """
 
 import re
+from functools import cached_property
 from pathlib import Path
 
 from packaging.version import Version
 
-from nipoppy.config.pipeline import BasePipelineConfig
+from nipoppy.config.pipeline import (
+    BasePipelineConfig,
+    BIDSificationPipelineConfig,
+    ExtractionPipelineConfig,
+    ProcessingPipelineConfig,
+)
 from nipoppy.config.tracker import TrackerConfig
-from nipoppy.env import StrOrPathLike
+from nipoppy.env import PipelineTypeEnum, StrOrPathLike
 from nipoppy.exceptions import ConfigError, FileOperationError, WorkflowError
 from nipoppy.layout import DatasetLayout
 from nipoppy.logger import get_logger
 from nipoppy.utils.utils import load_json
+from nipoppy.workflows.services.boutiques import (
+    load_boutiques_config,
+    resolve_container_file,
+)
 
 logger = get_logger()
 
@@ -196,3 +206,110 @@ def check_pipeline_variables(study, pipeline_type, pipeline_name, pipeline_versi
                 "to set it in the PIPELINE_VARIABLES section of the config file at "
                 f"{study.layout.fpath_config}"
             )
+
+
+class ResolvedPipeline:
+    """Resolve an installed pipeline and lazily load its runtime artifacts.
+
+    Resolution stays lazy so layout validation precedes config loading and log
+    creation. This reader performs no execution or participant selection.
+    """
+
+    def __init__(self, study, request, render):
+        self.study = study
+        self.request = request
+        self.name = request.name
+        self.version = request.version
+        self.step_name = request.step
+        self.render = render
+
+    def resolve_version(self):
+        """Choose the latest installed version when none was requested."""
+        if self.version is None:
+            self.version = get_pipeline_version(
+                self.name,
+                self.study.layout.get_dpath_pipeline_store(self.request.pipeline_type),
+            )
+            logger.warning(
+                f"Pipeline version not specified, using version {self.version}"
+            )
+
+    def resolve_step(self):
+        """Choose the configured default step when none was requested."""
+        if self.step_name is None:
+            self.step_name = self.step.NAME
+            logger.warning(f"Pipeline step not specified, using step {self.step_name}")
+
+    def check_variables(self):
+        """Require all pipeline variables before setup creates directories."""
+        check_pipeline_variables(
+            self.study, self.request.pipeline_type, self.name, self.version
+        )
+
+    @cached_property
+    def bundle(self) -> Path:
+        """Location of the installed bundle, using the runner's own identity."""
+        return self.study.layout.get_dpath_pipeline_bundle(
+            self.request.pipeline_type, self.name, self.version
+        )
+
+    @cached_property
+    def config(self):
+        """Load the typed pipeline config with runtime substitution precedence."""
+        classes = {
+            PipelineTypeEnum.PROCESSING: ProcessingPipelineConfig,
+            PipelineTypeEnum.BIDSIFICATION: BIDSificationPipelineConfig,
+            PipelineTypeEnum.EXTRACTION: ExtractionPipelineConfig,
+        }
+        return self.load_config(
+            self.bundle, self.name, self.version, classes[self.request.pipeline_type]
+        )
+
+    def load_config(self, bundle, name, version, pipeline_class):
+        """Load a related bundle using the current runtime substitution context."""
+        return load_pipeline_config(
+            self.study,
+            self.request.pipeline_type,
+            self.render,
+            bundle,
+            name,
+            version,
+            pipeline_class,
+        )
+
+    @cached_property
+    def step(self):
+        """Read the requested or default step."""
+        return self.config.get_step_config(step_name=self.step_name)
+
+    @cached_property
+    def descriptor(self):
+        """Load the step's descriptor with global pipeline variables."""
+        return load_descriptor(self.study, self.config, self.step, self.bundle)
+
+    @cached_property
+    def invocation(self):
+        """Load the step's invocation with global pipeline variables."""
+        return load_invocation(self.study, self.config, self.step, self.bundle)
+
+    @cached_property
+    def tracker(self):
+        """Load the step's tracker config without per-item rendering."""
+        return load_tracker_config(self.study, self.config, self.step, self.bundle)
+
+    @cached_property
+    def ignore_patterns(self):
+        """Compile the step's optional PyBIDS ignore patterns."""
+        return load_pybids_ignore_patterns(
+            self.study, self.config, self.step, self.bundle
+        )
+
+    @cached_property
+    def container_file(self):
+        """Resolve and check the container image lazily."""
+        return resolve_container_file(self.config, self.step)
+
+    @cached_property
+    def boutiques_config(self):
+        """Read container configuration embedded in the descriptor."""
+        return load_boutiques_config(self.descriptor)
