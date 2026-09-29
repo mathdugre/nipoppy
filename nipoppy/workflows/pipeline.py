@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from abc import ABC, abstractmethod
@@ -53,16 +52,13 @@ from nipoppy.utils.bids import (
     check_participant_id,
     check_session_id,
     create_bids_db,
-    participant_id_to_bids_participant_id,
-    session_id_to_bids_session_id,
 )
 from nipoppy.utils.utils import (
-    apply_substitutions_to_json,
     get_pipeline_tag,
     load_json,
-    process_template_str,
 )
 from nipoppy.workflows.base import BaseDatasetWorkflow
+from nipoppy.workflows.services.templates import TemplateRenderer
 
 if TYPE_CHECKING:
     import bids
@@ -455,57 +451,41 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
 
         return self.study.config.propagate_container_config_to_pipeline(pipeline_config)
 
-    def process_template_json(
-        self,
-        template_json: dict,
-        participant_id: str | None = None,
-        session_id: str | None = None,
-        bids_participant_id: str | None = None,
-        bids_session_id: str | None = None,
-        objs: list | None = None,
-        return_str: bool = False,
-        with_substitutions: bool = True,
-        **kwargs,
-    ):
-        """Replace template strings in a JSON object."""
-        if with_substitutions:
-            # apply user-defined substitutions to maintain compatibility with older
-            # pipeline config files that do not use the new pipeline variables
-            template_json = apply_substitutions_to_json(
-                template_json, self.study.config.SUBSTITUTIONS
-            )
-        if participant_id is not None:
-            if bids_participant_id is None:
-                bids_participant_id = participant_id_to_bids_participant_id(
-                    participant_id
-                )
-            kwargs["participant_id"] = participant_id
-            kwargs["bids_participant_id"] = bids_participant_id
-
-        if session_id is not None:
-            if bids_session_id is None:
-                bids_session_id = session_id_to_bids_session_id(session_id)
-            kwargs["session_id"] = session_id
-            kwargs["bids_session_id"] = bids_session_id
-
-        if objs is None:
-            objs = []
-        objs.extend([self, self.study.layout])
-
-        if kwargs:
-            logger.debug("Available replacement strings: ")
-            max_len = max(len(k) for k in kwargs)
-            for k, v in kwargs.items():
-                logger.debug(f"\t{k}:".ljust(max_len + 3) + v)
-            logger.debug(f"\t+ all attributes in: {objs}")
-
-        template_json_str = process_template_str(
-            json.dumps(template_json),
-            objs=objs,
-            **kwargs,
+    def process_template_json(self, template_json, **kwargs):
+        """Render with the legacy workflow namespace during migration."""
+        values = {
+            "name": lambda: self.name,
+            "dpath_root": lambda: self.dpath_root,
+            "fpath_layout": lambda: self.fpath_layout,
+            "verbose": lambda: self.verbose,
+            "dry_run": lambda: self.dry_run,
+            "pipeline_name": lambda: self.pipeline_name,
+            "pipeline_version": lambda: self.pipeline_version,
+            "pipeline_step": lambda: self.pipeline_step,
+            "participant_id": lambda: self.participant_id,
+            "session_id": lambda: self.session_id,
+            "use_subcohort": lambda: self.use_subcohort,
+            "write_subcohort": lambda: self.write_subcohort,
+            "hpc": lambda: self.hpc,
+            "n_jobs": lambda: self.n_jobs,
+            "n_success": lambda: self.n_success,
+            "n_total": lambda: self.n_total,
+            "subcommand": lambda: self.subcommand,
+            "simulate": lambda: self.simulate,
+            "keep_workdir": lambda: self.keep_workdir,
+            "tar": lambda: self.tar,
+            "dpath_pipeline": lambda: self.dpath_pipeline,
+            "dpath_pipeline_output": lambda: self.dpath_pipeline_output,
+            "dpath_pipeline_work": lambda: self.dpath_pipeline_work,
+            "dpath_pipeline_bids_db": lambda: self.dpath_pipeline_bids_db,
+            "dpath_pipeline_bundle": lambda: self.dpath_pipeline_bundle,
+            "fpath_container": lambda: self.fpath_container,
+            "dpath_pipeline_idp": lambda: self.dpath_pipeline_idp,
+        }
+        renderer = TemplateRenderer(
+            self.study.config.SUBSTITUTIONS, values, self.study.layout
         )
-
-        return template_json_str if return_str else json.loads(template_json_str)
+        return renderer.render(template_json, **kwargs)
 
     def set_up_bids_db(
         self,
