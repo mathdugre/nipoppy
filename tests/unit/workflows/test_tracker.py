@@ -14,6 +14,7 @@ from nipoppy.tabular.curation_status import CurationStatusTable
 from nipoppy.tabular.manifest import Manifest
 from nipoppy.tabular.processing_status import ProcessingStatusTable
 from nipoppy.workflows.services.archive import tar_directory
+from nipoppy.workflows.services.execution import BatchResult
 from nipoppy.workflows.tracker import PipelineTracker
 from tests.conftest import (
     create_empty_dataset,
@@ -52,11 +53,11 @@ def tracker(tmp_path: Path):
         tracker.study.layout.dpath_pipelines,
         processing_pipelines=[
             {
-                "NAME": tracker.pipeline_name,
-                "VERSION": tracker.pipeline_version,
+                "NAME": tracker.pipeline.name,
+                "VERSION": tracker.pipeline.version,
                 "STEPS": [
                     {
-                        "NAME": tracker.pipeline_step,
+                        "NAME": tracker.pipeline.step_name,
                         "TRACKER_CONFIG_FILE": fname_tracker_config,
                     }
                 ],
@@ -71,7 +72,7 @@ def tracker(tmp_path: Path):
         "PARTICIPANT_SESSION_DIR": "[[NIPOPPY_PARTICIPANT_ID]]/[[NIPOPPY_BIDS_SESSION_ID]]",
     }
 
-    (tracker.dpath_pipeline_bundle / fname_tracker_config).write_text(
+    (tracker.pipeline.bundle / fname_tracker_config).write_text(
         json.dumps(tracker_config)
     )
 
@@ -93,7 +94,7 @@ def test_apply_analysis_level_success(analysis_level):
 def test_run_setup(tracker: PipelineTracker):
     tracker.run_setup()
     assert tracker.processing_status_table.empty
-    assert not tracker.dpath_pipeline.exists(), "Tracker should not create directory"
+    assert not tracker.derivatives.exists(), "Tracker should not create directory"
 
 
 def test_run_setup_existing_processing_status_file(tracker: PipelineTracker):
@@ -155,7 +156,7 @@ def test_run_setup_existing_bad_processing_status_file(
 )
 def test_check_status(tracker: PipelineTracker, relative_paths, expected_status):
     for relative_path_to_write in ["dirA/01_ses-1.txt", "dirA/dirB/file.txt"]:
-        fpath = tracker.dpath_pipeline_output / relative_path_to_write
+        fpath = tracker.output / relative_path_to_write
         fpath.parent.mkdir(parents=True, exist_ok=True)
         fpath.touch()
 
@@ -197,12 +198,12 @@ def test_check_status_with_tarball(
     expected_status,
 ):
     for relative_path_to_write in ["dirA/01_ses-1.txt", "dirA/dirB/file.txt"]:
-        fpath = tracker.dpath_pipeline_output / relative_path_to_write
+        fpath = tracker.output / relative_path_to_write
         fpath.parent.mkdir(parents=True, exist_ok=True)
         fpath.touch()
 
     # use PipelineRunner to tar the directory
-    dpath_to_tar = tracker.dpath_pipeline_output / relative_dpath_to_tar
+    dpath_to_tar = tracker.output / relative_dpath_to_tar
     tar_directory(dpath_to_tar)
 
     assert not dpath_to_tar.exists()
@@ -283,12 +284,12 @@ def test_run_single(
         "file.txt",
         "02/ses-1/results.txt",
     ]:
-        fpath = tracker.dpath_pipeline_output / relative_path_to_write
+        fpath = tracker.output / relative_path_to_write
         fpath.parent.mkdir(parents=True, exist_ok=True)
         fpath.touch()
 
     for relative_dpath_to_tar in ["01/ses-1", "02/ses-1"]:
-        dpath_to_tar = tracker.dpath_pipeline_output / relative_dpath_to_tar
+        dpath_to_tar = tracker.output / relative_dpath_to_tar
         tar_directory(dpath_to_tar)
 
     assert not dpath_to_tar.exists()
@@ -299,7 +300,7 @@ def test_run_single(
 
 
 def test_run_single_no_config(tracker: PipelineTracker):
-    tracker.pipeline_config.STEPS[0].TRACKER_CONFIG_FILE = None
+    tracker.pipeline.config.STEPS[0].TRACKER_CONFIG_FILE = None
     with pytest.raises(ValueError, match="No tracker config file specified for"):
         tracker.run_single("01", "1")
 
@@ -339,7 +340,7 @@ def test_update_status_file(
     records,
     expected_processing_status_table: ProcessingStatusTable,
 ):
-    tracker.run_single_results = records
+    tracker.result = BatchResult.from_results([(True, record) for record in records])
     tracker._update_status_file()
 
     assert tracker.study.layout.fpath_processing_status.exists()
@@ -356,10 +357,10 @@ def test_run_main(tracker: PipelineTracker, mocker: pytest_mock.MockFixture):
 
 def test_run_no_create_work_directory(tracker: PipelineTracker):
     tracker.run()
-    assert not tracker.dpath_pipeline_work.exists()
+    assert not tracker.workspace.work.exists()
 
 
 def test_run_no_rm_work_directory(tracker: PipelineTracker):
-    tracker.dpath_pipeline_work.mkdir(parents=True)
+    tracker.workspace.work.mkdir(parents=True)
     tracker.run()
-    assert tracker.dpath_pipeline_work.exists()
+    assert tracker.workspace.work.exists()

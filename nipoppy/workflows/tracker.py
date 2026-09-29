@@ -84,18 +84,16 @@ class PipelineTracker(BasePipelineWorkflow):
         # collect list of paths in tarball if it exists
         paths_tarred = []
         if relative_dpath_tarred is not None:
-            fpath_tarball = (
-                self.dpath_pipeline_output / f"{relative_dpath_tarred}{EXT_TAR}"
-            )
+            fpath_tarball = self.output / f"{relative_dpath_tarred}{EXT_TAR}"
             if fpath_tarball.exists():
                 with tarfile.open(fpath_tarball) as tarball:
                     paths_tarred = tarball.getnames()
 
         for relative_path in relative_paths:
             relative_path = Path(relative_path)
-            logger.debug(f"Checking path {self.dpath_pipeline_output / relative_path}")
+            logger.debug(f"Checking path {self.output / relative_path}")
 
-            matches_glob = list(self.dpath_pipeline_output.glob(str(relative_path)))
+            matches_glob = list(self.output.glob(str(relative_path)))
             logger.debug(f"Matches: {matches_glob}")
 
             # also check tarball paths if applicable/needed
@@ -144,8 +142,8 @@ class PipelineTracker(BasePipelineWorkflow):
         """Run tracker on a single participant/session."""
         # replace template strings in the tracker config
         tracker_config = TrackerConfig(
-            **self.process_template_json(
-                self.tracker_config.model_dump(mode="json"),
+            **self.templates.render(
+                self.pipeline.tracker.model_dump(mode="json"),
                 participant_id=participant_id,
                 session_id=session_id,
             )
@@ -159,9 +157,9 @@ class PipelineTracker(BasePipelineWorkflow):
         processing_status_record = {
             ProcessingStatusTable.col_participant_id: participant_id,
             ProcessingStatusTable.col_session_id: session_id,
-            ProcessingStatusTable.col_pipeline_name: self.pipeline_name,
-            ProcessingStatusTable.col_pipeline_version: self.pipeline_version,
-            ProcessingStatusTable.col_pipeline_step: self.pipeline_step,
+            ProcessingStatusTable.col_pipeline_name: self.pipeline.name,
+            ProcessingStatusTable.col_pipeline_version: self.pipeline.version,
+            ProcessingStatusTable.col_pipeline_step: self.pipeline.step_name,
             ProcessingStatusTable.col_status: status,
         }
         return processing_status_record
@@ -169,7 +167,7 @@ class PipelineTracker(BasePipelineWorkflow):
     def _update_status_file(self):
         """Update the processing status file."""
         self.processing_status_table = (
-            self.processing_status_table.add_or_update_records(self.run_single_results)
+            self.processing_status_table.add_or_update_records(self.result.payloads)
         )
         logger.info(
             "New/updated processing status table shape: "

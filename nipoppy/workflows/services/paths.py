@@ -3,11 +3,20 @@
 from functools import cached_property
 from pathlib import Path
 
+from nipoppy.layout import DatasetLayout
+from nipoppy.workflows.services.artifacts import ResolvedPipeline
+from nipoppy.workflows.services.cohort import SelectionOptions
+
 
 class PipelineWorkspace:
     """Keep intermediate path identity independent of extraction dependencies."""
 
-    def __init__(self, layout, pipeline, selection):
+    def __init__(
+        self,
+        layout: DatasetLayout,
+        pipeline: ResolvedPipeline,
+        selection: SelectionOptions,
+    ):
         self.layout = layout
         self.pipeline = pipeline
         self.selection = selection

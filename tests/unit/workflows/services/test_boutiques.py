@@ -80,7 +80,7 @@ def test_run_bosh_func_capture_error(
 ):
     """Test that a Boutiques launch command captures errors correctly."""
     mocked_run_command = mocker.patch(
-        "nipoppy.workflows.base._run_command",
+        "nipoppy.utils.command._run_command",
         side_effect=subprocess.CalledProcessError(
             returncode=1,
             cmd=["bosh", "exec", "launch"],
@@ -104,10 +104,19 @@ def test_bosh_simulate_log(
     mocker: pytest_mock.MockerFixture,
 ):
     """Test that a Boutiques simulate command logs the command."""
-    mocked_run_command = mocker.patch("nipoppy.workflows.base._run_command")
+    mocked_run_command = mocker.patch("nipoppy.utils.command._run_command")
     run_bosh_simulate(
         invocation_str=json.dumps(invocation),
         descriptor_str=json.dumps(bosh_descriptor),
         run_command=mocked_run_command,
     )
     assert "Additional launch options:" in caplog.text
+
+
+def test_prepared_arguments_are_immutable():
+    from nipoppy.workflows.services.boutiques import PreparedInvocation
+
+    args = ["--no-pull"]
+    prepared = PreparedInvocation("{}", "{}", args)
+    args.append("--debug")
+    assert prepared.launch_args == ("--no-pull",)

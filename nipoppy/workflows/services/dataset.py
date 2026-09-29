@@ -40,7 +40,8 @@ def generate_log_path(
     directory = layout.dpath_logs / PROGRAM_NAME / name
     for parent in parents:
         directory /= parent
-    return directory / add_path_timestamp(f"{fname_stem or name}{EXT_LOG}")
+    stem = name if fname_stem is None else fname_stem
+    return directory / add_path_timestamp(f"{stem}{EXT_LOG}")
 
 
 class DatasetAccess:

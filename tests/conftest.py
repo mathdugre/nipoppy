@@ -449,9 +449,3 @@ def study(tmp_path: Path) -> Study:
     """Create a fixture Study instance to use in tests."""
     dpath_root = tmp_path / "my_study"
     return Study(layout=DatasetLayout(dpath_root=dpath_root))
-
-
-def _set_up_substitution_testing(_object, mocker: pytest_mock.MockerFixture):
-    return mocker.patch.object(
-        _object, "process_template_json", side_effect=_object.process_template_json
-    )

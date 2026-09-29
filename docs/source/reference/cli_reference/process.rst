@@ -2,7 +2,7 @@
 ===================
 
 .. note::
-   This command calls the :py:class:`nipoppy.workflows.processing_runner.ProcessingRunner` class from the Python :term:`API` internally.
+   This command constructs its workflow through :py:func:`nipoppy.workflows.factories.create_processing_workflow`. The CLI options and exit codes are unchanged.
 
 .. click:: nipoppy.cli.cli:process
    :prog: nipoppy process

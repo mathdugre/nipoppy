@@ -9,6 +9,7 @@ from nipoppy.utils import fileops
 from nipoppy.utils.command import _run_command
 from nipoppy.utils.utils import get_pipeline_tag
 from nipoppy.workflows.base import BaseWorkflow
+from nipoppy.workflows.services.artifacts import ResolvedPipeline
 from nipoppy.workflows.services.boutiques import (
     execute_invocation,
     prepare_container,
@@ -17,16 +18,18 @@ from nipoppy.workflows.services.boutiques import (
     run_bosh_simulate,
 )
 from nipoppy.workflows.services.cohort import (
+    SelectionOptions,
     WorkItem,
     check_filter_args,
     plan_work_items,
     write_subcohort,
 )
-from nipoppy.workflows.services.dataset import generate_log_path
+from nipoppy.workflows.services.dataset import DatasetAccess, generate_log_path
 from nipoppy.workflows.services.execution import (
     BatchResult,
     execute_locally,
     log_summary,
+    require_parallel_support,
 )
 from nipoppy.workflows.services.hpc import (
     HPCJob,
@@ -34,6 +37,9 @@ from nipoppy.workflows.services.hpc import (
     SubmissionPaths,
     load_hpc_config,
 )
+from nipoppy.workflows.services.models import ExecutionOptions
+from nipoppy.workflows.services.paths import PipelineWorkspace
+from nipoppy.workflows.services.templates import TemplateRenderer
 
 logger = get_logger()
 
@@ -42,7 +48,14 @@ class PipelineExecutionWorkflow(BaseWorkflow):
     """Sequence dataset setup, selection and execution through focused modules."""
 
     def __init__(
-        self, name, dataset, pipeline, selection, execution, workspace, templates
+        self,
+        name: str,
+        dataset: DatasetAccess,
+        pipeline: ResolvedPipeline,
+        selection: SelectionOptions,
+        execution: ExecutionOptions,
+        workspace: PipelineWorkspace,
+        templates: TemplateRenderer,
     ):
         super().__init__(name, verbose=execution.verbose, dry_run=execution.dry_run)
         self.dataset = dataset
@@ -51,7 +64,14 @@ class PipelineExecutionWorkflow(BaseWorkflow):
         self.execution = execution
         self.workspace = workspace
         self.templates = templates
+        require_parallel_support(execution.n_jobs)
         self.result = BatchResult()
+        self.templates.values.update(
+            {
+                "n_success": lambda: self.result.n_success,
+                "n_total": lambda: self.result.n_total,
+            }
+        )
         # Domain paths are registered explicitly and remain lazy.
         self.templates.values.update(self.template_values())
 
@@ -67,25 +87,39 @@ class PipelineExecutionWorkflow(BaseWorkflow):
         """Domain flags to propagate to scheduler child commands."""
         return []
 
+    def generate_fpath_log(self):
+        """Resolve default identity and construct the pipeline log path lazily."""
+        self.pipeline.resolve_version()
+        self.pipeline.resolve_step()
+        parent = get_pipeline_tag(
+            self.pipeline.name, self.pipeline.version, self.pipeline.step_name
+        )
+        stem = get_pipeline_tag(
+            self.pipeline.name,
+            self.pipeline.version,
+            self.pipeline.step_name,
+            self.selection.participant_id,
+            self.selection.session_id,
+        )
+        return generate_log_path(self.dataset.study.layout, self.name, parent, stem)
+
+    def __str__(self):
+        """Describe identity and options without loading artifacts."""
+        return self._str_helper(
+            components=[
+                self.pipeline.name,
+                self.pipeline.version,
+                self.pipeline.step_name,
+                self.selection,
+                self.execution,
+            ]
+        )
+
     def run_setup(self):
         """Preserve validation, logging, directory creation and raw-validation order."""
         self.dataset.study.layout.validate()
         if not self.execution.skip_logfile:
-            self.pipeline.resolve_version()
-            self.pipeline.resolve_step()
-            parent = get_pipeline_tag(
-                self.pipeline.name, self.pipeline.version, self.pipeline.step_name
-            )
-            stem = get_pipeline_tag(
-                self.pipeline.name,
-                self.pipeline.version,
-                self.pipeline.step_name,
-                self.selection.participant_id,
-                self.selection.session_id,
-            )
-            logger.add_file_handler(
-                generate_log_path(self.dataset.study.layout, self.name, parent, stem)
-            )
+            logger.add_file_handler(self.generate_fpath_log())
         super().run_setup()
         self.pipeline.resolve_version()
         self.pipeline.check_variables()

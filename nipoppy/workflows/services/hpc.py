@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import shlex
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -30,9 +31,12 @@ logger = get_logger()
 class HPCJob:
     """A command and its IDs, kept together when queue capacity truncates jobs."""
 
-    command: tuple[str, ...]
+    command: Sequence[str]
     participant_id: str | None
     session_id: str | None
+
+    def __post_init__(self):
+        object.__setattr__(self, "command", tuple(self.command))
 
 
 @dataclass(frozen=True)
@@ -215,61 +219,23 @@ class HPCRunner:
 
         return max(0, self.queue_limit - len(df_queue_status))
 
-    def _submit_array(
+    def submit_jobs(
         self,
+        jobs: list[HPCJob],
         job_name: str,
-        job_array_commands: list,
-        participant_ids: list,
-        session_ids: list,
-        dpath_work: Path,
-        dpath_hpc_logs: Path,
-        fname_hpc_error: str,
-        fname_job_script: str,
-        pipeline_name: str,
-        pipeline_version: str,
-        pipeline_step: str,
+        paths: SubmissionPaths,
         dry_run: bool = False,
     ) -> SubmissionResult:
-        """
-        Submit a job to the HPC scheduler.
+        """Limit aligned work items to queue capacity, then submit one job array.
 
-        Parameters
-        ----------
-        job_name : str
-            Name of the job to submit.
-        job_array_commands : list
-            List of commands to run.
-        participant_ids : list
-            List of participant IDs associated with the job.
-        session_ids : list
-            List of session IDs associated with the job.
-        dpath_work : Path
-            Working directory for the job.
-        dpath_hpc_logs : Path
-            Directory where HPC logs will be saved.
-        fname_hpc_error : str
-            Filename of the HPC error log.
-        fname_job_script : str
-            Filename of the job script to generate.
-        pipeline_name : str
-            Name of the pipeline being run.
-        pipeline_version : str
-            Version of the pipeline being run.
-        pipeline_step : str
-            Step of the pipeline being run.
-        dry_run : bool, optional
-            Whether to only generate the script without submitting, by default False.
-
-        Returns
-        -------
-        int
-            The number of jobs submitted
+        Dry runs retain the established queue query, stale-error removal and log
+        directory creation behavior, and report eligible slots as submitted.
         """
-        n_requested = len(job_array_commands)
-        n_available_jobs = self._get_n_available_job_slots()
-        job_array_commands = job_array_commands[:n_available_jobs]
-        participant_ids = participant_ids[:n_available_jobs]
-        session_ids = session_ids[:n_available_jobs]
+        n_requested = len(jobs)
+        jobs = jobs[: self._get_n_available_job_slots()]
+        job_array_commands = [shlex.join(job.command) for job in jobs]
+        participant_ids = [job.participant_id for job in jobs]
+        session_ids = [job.session_id for job in jobs]
 
         # skip if there are no jobs to submit
         if len(job_array_commands) == 0:
@@ -284,10 +250,10 @@ class HPCRunner:
 
         # This file is created by PySQA if the job submission command fails.
         # Delete it first to ensure only fresh submission errors are detected.
-        fpath_hpc_error = dpath_work / fname_hpc_error
+        fpath_hpc_error = paths.work / paths.error_filename
         fileops.rm(fpath_hpc_error, missing_ok=True)
 
-        fileops.mkdir(dpath_hpc_logs)
+        fileops.mkdir(paths.logs)
 
         # user-defined args
         job_args = self._check_hpc_config()
@@ -296,24 +262,24 @@ class HPCRunner:
         if not dry_run:
             job_id = self._queue_adapter.submit_job(
                 queue=self.hpc_cluster,
-                working_directory=str(dpath_work),
+                working_directory=str(paths.work),
                 command="",  # not used in default template but cannot be None
                 cores=0,  # not used in default template but cannot be None
                 NIPOPPY_HPC=self.hpc_cluster,
                 NIPOPPY_JOB_NAME=job_name,
-                NIPOPPY_DPATH_LOGS=dpath_hpc_logs,
+                NIPOPPY_DPATH_LOGS=paths.logs,
                 NIPOPPY_HPC_PREAMBLE_STRINGS=self.preamble,
                 NIPOPPY_COMMANDS=job_array_commands,
                 NIPOPPY_DPATH_ROOT=self.dpath_root,
-                NIPOPPY_PIPELINE_NAME=pipeline_name,
-                NIPOPPY_PIPELINE_VERSION=pipeline_version,
-                NIPOPPY_PIPELINE_STEP=pipeline_step,
+                NIPOPPY_PIPELINE_NAME=self.pipeline_name,
+                NIPOPPY_PIPELINE_VERSION=self.pipeline_version,
+                NIPOPPY_PIPELINE_STEP=self.pipeline_step,
                 NIPOPPY_PARTICIPANT_IDS=participant_ids,
                 NIPOPPY_SESSION_IDS=session_ids,
                 **job_args,
             )
 
-        fpath_job_script = dpath_work / fname_job_script
+        fpath_job_script = paths.work / paths.script_filename
         if fpath_job_script.exists():
             logger.info(f"Job script created at {fpath_job_script}")
         else:
@@ -334,33 +300,6 @@ class HPCRunner:
             logger.info(f"HPC job ID: {job_id}")
 
         return SubmissionResult(n_requested, len(job_array_commands), job_id)
-
-    def submit_jobs(
-        self,
-        jobs: list[HPCJob],
-        job_name: str,
-        paths: SubmissionPaths,
-        dry_run: bool = False,
-    ) -> SubmissionResult:
-        """Submit aligned commands and IDs through one structured request."""
-        return self._submit_array(
-            job_name,
-            [shlex.join(job.command) for job in jobs],
-            [job.participant_id for job in jobs],
-            [job.session_id for job in jobs],
-            paths.work,
-            paths.logs,
-            paths.error_filename,
-            paths.script_filename,
-            self.pipeline_name,
-            self.pipeline_version,
-            self.pipeline_step,
-            dry_run,
-        )
-
-    def submit(self, *args, **kwargs) -> int:
-        """Compatibility entry point until callers migrate to structured jobs."""
-        return self._submit_array(*args, **kwargs).submitted
 
 
 def load_hpc_config(step, bundle: Path, render) -> HpcConfig:

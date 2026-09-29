@@ -127,3 +127,16 @@ AppleDouble tar entries. Both existing archive tests pass with
 `COPYFILE_DISABLE=1`. Remaining suite warnings are Trogon's existing Click
 deprecation warnings. Other Python versions and external API/link checks were not
 run locally.
+
+
+## Completed migration
+
+All three runners now inherit directly from `PipelineExecutionWorkflow`, whose
+only workflow base is `BaseWorkflow`. The old `Runner` module is removed. See
+[the implementation guide](../../docs/workflow-refactor.md) for the commit series,
+module ownership, Python construction examples, and preserved behavior.
+
+Final validation on Python 3.14: 130 serial tests and 1,454 parallel tests passed
+(1,584 total). API and linkcheck tests were excluded. Architecture checks cover
+inheritance depth, removal of the old layer, dependency direction and absence of
+generic attribute forwarding.

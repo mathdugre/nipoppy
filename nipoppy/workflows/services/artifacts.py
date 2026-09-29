@@ -5,6 +5,7 @@ study's runtime substitutions and inherited container configuration.
 """
 
 import re
+from collections.abc import Callable
 from functools import cached_property
 from pathlib import Path
 
@@ -21,11 +22,13 @@ from nipoppy.env import PipelineTypeEnum, StrOrPathLike
 from nipoppy.exceptions import ConfigError, FileOperationError, WorkflowError
 from nipoppy.layout import DatasetLayout
 from nipoppy.logger import get_logger
+from nipoppy.study import Study
 from nipoppy.utils.utils import load_json
 from nipoppy.workflows.services.boutiques import (
     load_boutiques_config,
     resolve_container_file,
 )
+from nipoppy.workflows.services.models import PipelineRequest
 
 logger = get_logger()
 
@@ -75,41 +78,33 @@ def get_pipeline_version(
         )
 
 
-def load_descriptor(study, config, step, bundle):
-    """Load the pipeline step's Boutiques descriptor."""
-    if (fname_descriptor := step.DESCRIPTOR_FILE) is None:
+def _load_boutiques_json(study, config, bundle, filename, kind):
+    if filename is None:
         raise ConfigError(
-            f"No descriptor file specified for pipeline {config.NAME} {config.VERSION}"
+            f"No {kind} file specified for pipeline {config.NAME} {config.VERSION}"
         )
-    fpath_descriptor = bundle / fname_descriptor
-    logger.info(f"Loading descriptor from {fpath_descriptor}")
-    descriptor = load_json(fpath_descriptor)
-    descriptor = study.config.apply_pipeline_variables(
+    path = bundle / filename
+    logger.info(f"Loading {kind} from {path}")
+    return study.config.apply_pipeline_variables(
         pipeline_type=config.PIPELINE_TYPE,
         pipeline_name=config.NAME,
         pipeline_version=config.VERSION,
-        json_obj=descriptor,
+        json_obj=load_json(path),
     )
-    return descriptor
+
+
+def load_descriptor(study, config, step, bundle):
+    """Load the step's descriptor with its global pipeline variables."""
+    return _load_boutiques_json(
+        study, config, bundle, step.DESCRIPTOR_FILE, "descriptor"
+    )
 
 
 def load_invocation(study, config, step, bundle):
-    """Load the pipeline step's Boutiques invocation."""
-    if (fname_invocation := step.INVOCATION_FILE) is None:
-        raise ConfigError(
-            f"No invocation file specified for pipeline {config.NAME} {config.VERSION}"
-        )
-    fpath_invocation = bundle / fname_invocation
-    logger.info(f"Loading invocation from {fpath_invocation}")
-    invocation = load_json(fpath_invocation)
-
-    invocation = study.config.apply_pipeline_variables(
-        pipeline_type=config.PIPELINE_TYPE,
-        pipeline_name=config.NAME,
-        pipeline_version=config.VERSION,
-        json_obj=invocation,
+    """Load the step's invocation with its global pipeline variables."""
+    return _load_boutiques_json(
+        study, config, bundle, step.INVOCATION_FILE, "invocation"
     )
-    return invocation
 
 
 def load_tracker_config(study, config, step, bundle):
@@ -215,7 +210,7 @@ class ResolvedPipeline:
     creation. This reader performs no execution or participant selection.
     """
 
-    def __init__(self, study, request, render):
+    def __init__(self, study: Study, request: PipelineRequest, render: Callable):
         self.study = study
         self.request = request
         self.name = request.name
@@ -265,15 +260,17 @@ class ResolvedPipeline:
             self.bundle, self.name, self.version, classes[self.request.pipeline_type]
         )
 
-    def load_config(self, bundle, name, version, pipeline_class):
+    def load_config(
+        self, dpath_pipeline_bundle, pipeline_name, pipeline_version, pipeline_class
+    ):
         """Load a related bundle using the current runtime substitution context."""
         return load_pipeline_config(
             self.study,
             self.request.pipeline_type,
             self.render,
-            bundle,
-            name,
-            version,
+            dpath_pipeline_bundle,
+            pipeline_name,
+            pipeline_version,
             pipeline_class,
         )
 

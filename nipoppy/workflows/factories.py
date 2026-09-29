@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from nipoppy.env import PipelineTypeEnum, StrOrPathLike
 from nipoppy.workflows.services.cohort import SelectionOptions
 from nipoppy.workflows.services.models import ExecutionOptions, PipelineRequest
 
 if TYPE_CHECKING:
+    from nipoppy.study import Study
     from nipoppy.workflows.bids_conversion import BIDSificationRunner
     from nipoppy.workflows.extractor import ExtractionRunner
     from nipoppy.workflows.processing_runner import ProcessingRunner
+    from nipoppy.workflows.services.artifacts import ResolvedPipeline
+    from nipoppy.workflows.services.dataset import DatasetAccess
+    from nipoppy.workflows.services.paths import PipelineWorkspace
+    from nipoppy.workflows.services.templates import TemplateRenderer
+
+
+class PipelineDependencies(TypedDict):
+    """Named dependencies accepted by PipelineExecutionWorkflow constructors."""
+
+    name: str
+    dataset: DatasetAccess
+    pipeline: ResolvedPipeline
+    selection: SelectionOptions
+    execution: ExecutionOptions
+    workspace: PipelineWorkspace
+    templates: TemplateRenderer
 
 
 def create_processing_workflow(
@@ -133,14 +150,23 @@ def create_extraction_workflow(
     )
 
 
-def create_pipeline_dependencies(dpath_root, name, request, selection, execution):
+def create_pipeline_dependencies(
+    dpath_root: StrOrPathLike,
+    name: str,
+    request: PipelineRequest,
+    selection: SelectionOptions,
+    execution: ExecutionOptions,
+    *,
+    study: Study | None = None,
+) -> PipelineDependencies:
     """Assemble explicit dependencies without loading configuration or artifacts."""
     from nipoppy.workflows.services.artifacts import ResolvedPipeline
     from nipoppy.workflows.services.dataset import DatasetAccess, open_dataset
     from nipoppy.workflows.services.paths import PipelineWorkspace
     from nipoppy.workflows.services.templates import TemplateRenderer
 
-    study = open_dataset(dpath_root, execution.fpath_layout)
+    if study is None:
+        study = open_dataset(dpath_root, execution.fpath_layout)
     dataset = DatasetAccess(study, dry_run=execution.dry_run)
     values = {}
     templates = TemplateRenderer(

@@ -1,5 +1,6 @@
 """Unit tests for HPCRunner."""
 
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from nipoppy.config.hpc import HpcConfig
 from nipoppy.env import PROGRAM_NAME
 from nipoppy.exceptions import LayoutError, WorkflowError
 from nipoppy.utils.utils import DPATH_HPC, FPATH_HPC_TEMPLATE
-from nipoppy.workflows.services.hpc import HPCRunner
+from nipoppy.workflows.services.hpc import HPCJob, HPCRunner, SubmissionPaths
 
 
 @pytest.fixture
@@ -45,20 +46,20 @@ def hpc_runner(hpc_config: HpcConfig, tmp_path: Path) -> HPCRunner:
 
 
 @pytest.fixture
-def submit_kwargs(tmp_path: Path) -> dict:
-    """Fixture for HPCRunner.submit() tests that don't care about kwargs."""
+def submit_kwargs(tmp_path: Path, hpc_runner: HPCRunner) -> dict:
+    """Structured request for scheduler tests with concrete identity and paths."""
+    hpc_runner.pipeline_name = "test-pipe"
+    hpc_runner.pipeline_version = "1.0"
+    hpc_runner.pipeline_step = "step1"
     return {
         "job_name": "my-job",
-        "job_array_commands": ["echo test", "echo test2"],
-        "participant_ids": ["P01", "P02"],
-        "session_ids": ["S01", "S01"],
-        "dpath_work": tmp_path / "work",
-        "dpath_hpc_logs": tmp_path / "logs",
-        "fname_hpc_error": "error.log",
-        "fname_job_script": "script.sh",
-        "pipeline_name": "test-pipe",
-        "pipeline_version": "1.0",
-        "pipeline_step": "step1",
+        "jobs": [
+            HPCJob(("echo", "test"), "P01", "S01"),
+            HPCJob(("echo", "test2"), "P02", "S01"),
+        ],
+        "paths": SubmissionPaths(
+            tmp_path / "work", tmp_path / "logs", "error.log", "script.sh"
+        ),
         "dry_run": False,
     }
 
@@ -204,9 +205,10 @@ def test_hpc_runner_submit(
         wraps=hpc_runner._queue_adapter.submit_job,
     )
 
-    n_submitted_jobs = hpc_runner.submit(**submit_kwargs)
+    n_submitted_jobs = hpc_runner.submit_jobs(**submit_kwargs)
 
-    assert n_submitted_jobs == n_available_job_slots
+    assert n_submitted_jobs.requested == len(submit_kwargs["jobs"])
+    assert n_submitted_jobs.submitted == n_available_job_slots
 
     mocked_get_n_available_job_slots.assert_called_once()
 
@@ -217,22 +219,26 @@ def test_hpc_runner_submit(
 
     mocked_submit_job.assert_called_once_with(
         queue=hpc_runner.hpc_cluster,
-        working_directory=str(submit_kwargs["dpath_work"]),
+        working_directory=str(submit_kwargs["paths"].work),
         command="",
         cores=0,
         NIPOPPY_HPC=hpc_runner.hpc_cluster,
         NIPOPPY_JOB_NAME=submit_kwargs["job_name"],
-        NIPOPPY_DPATH_LOGS=submit_kwargs["dpath_hpc_logs"],
+        NIPOPPY_DPATH_LOGS=submit_kwargs["paths"].logs,
         NIPOPPY_HPC_PREAMBLE_STRINGS=hpc_runner.preamble,
-        NIPOPPY_COMMANDS=submit_kwargs["job_array_commands"][:n_available_job_slots],
-        NIPOPPY_DPATH_ROOT=hpc_runner.dpath_root,
-        NIPOPPY_PIPELINE_NAME=submit_kwargs["pipeline_name"],
-        NIPOPPY_PIPELINE_VERSION=submit_kwargs["pipeline_version"],
-        NIPOPPY_PIPELINE_STEP=submit_kwargs["pipeline_step"],
-        NIPOPPY_PARTICIPANT_IDS=submit_kwargs["participant_ids"][
+        NIPOPPY_COMMANDS=[shlex.join(job.command) for job in submit_kwargs["jobs"]][
             :n_available_job_slots
         ],
-        NIPOPPY_SESSION_IDS=submit_kwargs["session_ids"][:n_available_job_slots],
+        NIPOPPY_DPATH_ROOT=hpc_runner.dpath_root,
+        NIPOPPY_PIPELINE_NAME=hpc_runner.pipeline_name,
+        NIPOPPY_PIPELINE_VERSION=hpc_runner.pipeline_version,
+        NIPOPPY_PIPELINE_STEP=hpc_runner.pipeline_step,
+        NIPOPPY_PARTICIPANT_IDS=[job.participant_id for job in submit_kwargs["jobs"]][
+            :n_available_job_slots
+        ],
+        NIPOPPY_SESSION_IDS=[job.session_id for job in submit_kwargs["jobs"]][
+            :n_available_job_slots
+        ],
         **hpc_runner._check_hpc_config(),
     )
     assert f"HPC job ID: {job_id}" in caplog.text
@@ -253,21 +259,22 @@ def test_hpc_runner_submit_no_jobs(
     mocker.patch.object(hpc_runner, "_get_n_available_job_slots", return_value=0)
     mocked_submit_job = mocker.patch.object(hpc_runner._queue_adapter, "submit_job")
 
-    n_submitted_jobs = hpc_runner.submit(**submit_kwargs)
-    assert n_submitted_jobs == 0
+    n_submitted_jobs = hpc_runner.submit_jobs(**submit_kwargs)
+    assert n_submitted_jobs.requested == len(submit_kwargs["jobs"])
+    assert n_submitted_jobs.submitted == 0
     mocked_submit_job.assert_not_called()
 
 
 def test_hpc_runner_submit_creates_logdir(
     hpc_runner: HPCRunner, submit_kwargs: dict, mocker: pytest_mock.MockerFixture
 ):
-    dpath_logs = submit_kwargs["dpath_hpc_logs"]
+    dpath_logs = submit_kwargs["paths"].logs
 
     mocker.patch.object(hpc_runner._queue_adapter, "submit_job")
 
     # check that logs directory is created
     assert not (dpath_logs).exists()
-    hpc_runner.submit(**submit_kwargs)
+    hpc_runner.submit_jobs(**submit_kwargs)
     assert dpath_logs.exists()
 
 
@@ -285,7 +292,9 @@ def test_hpc_runner_submit_logs_job_script(
     caplog: pytest.LogCaptureFixture,
 ):
     def touch_job_script(*args, **kwargs):
-        fpath_script = submit_kwargs["dpath_work"] / submit_kwargs["fname_job_script"]
+        fpath_script = (
+            submit_kwargs["paths"].work / submit_kwargs["paths"].script_filename
+        )
         fpath_script.parent.mkdir(parents=True, exist_ok=True)
         fpath_script.touch()
 
@@ -293,7 +302,7 @@ def test_hpc_runner_submit_logs_job_script(
     if write_job_script:
         mocked_submit_job.side_effect = touch_job_script
 
-    hpc_runner.submit(**submit_kwargs)
+    hpc_runner.submit_jobs(**submit_kwargs)
     assert expected_message in caplog.text
 
 
@@ -306,7 +315,7 @@ def test_hpc_runner_submit_no_job_id(
 ):
     mocker.patch.object(hpc_runner._queue_adapter, "submit_job", return_value=None)
 
-    hpc_runner.submit(**submit_kwargs)
+    hpc_runner.submit_jobs(**submit_kwargs)
     assert "HPC job ID" not in caplog.text
 
 
@@ -314,7 +323,9 @@ def test_hpc_runner_submit_pysqa_error(
     hpc_runner: HPCRunner, submit_kwargs: dict, mocker: pytest_mock.MockFixture
 ):
     def write_error_file(*args, **kwargs):
-        fpath_error = submit_kwargs["dpath_work"] / submit_kwargs["fname_hpc_error"]
+        fpath_error = (
+            submit_kwargs["paths"].work / submit_kwargs["paths"].error_filename
+        )
         fpath_error.parent.mkdir(parents=True, exist_ok=True)
         fpath_error.write_text("PYSQA ERROR\n")
 
@@ -324,7 +335,7 @@ def test_hpc_runner_submit_pysqa_error(
     with pytest.raises(
         RuntimeError, match="Error occurred while submitting the HPC job:\nPYSQA ERROR"
     ):
-        hpc_runner.submit(**submit_kwargs)
+        hpc_runner.submit_jobs(**submit_kwargs)
 
 
 def test_hpc_runner_submit_error_no_dir(hpc_runner: HPCRunner, submit_kwargs: dict):
@@ -337,7 +348,7 @@ def test_hpc_runner_submit_error_no_dir(hpc_runner: HPCRunner, submit_kwargs: di
         LayoutError,
         match="The HPC directory with appropriate content needs to exist",
     ):
-        hpc_runner.submit(**submit_kwargs)
+        hpc_runner.submit_jobs(**submit_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -433,3 +444,10 @@ def test_hpc_runner_generate_cli_fails_duplicate_flags(hpc_runner: HPCRunner):
             session_id="1",
             extra_flags=[duplicate_flag],
         )
+
+
+def test_job_command_is_immutable():
+    command = ["echo", "one"]
+    job = HPCJob(command, "01", "A")
+    command.append("two")
+    assert job.command == ("echo", "one")

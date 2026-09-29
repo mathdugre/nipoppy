@@ -6,6 +6,7 @@ import copy
 import json
 import shlex
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -231,7 +232,10 @@ class PreparedInvocation:
 
     descriptor_str: str
     invocation_str: str
-    launch_args: tuple[str, ...]
+    launch_args: Sequence[str]
+
+    def __post_init__(self):
+        object.__setattr__(self, "launch_args", tuple(self.launch_args))
 
 
 def inject_container_image(descriptor: dict, uri: str) -> dict:

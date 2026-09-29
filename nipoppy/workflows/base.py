@@ -10,15 +10,6 @@ from nipoppy.base import Base
 from nipoppy.env import StrOrPathLike
 from nipoppy.exceptions import ReturnCode
 from nipoppy.logger import get_logger
-from nipoppy.utils.command import (  # noqa: F401
-    CommandRunner,
-    LogPrefix,
-    _log_command,
-    _run_command,
-)
-from nipoppy.utils.utils import (
-    is_nipoppy_project,
-)
 from nipoppy.workflows.services.dataset import (
     DatasetAccess,
     generate_log_path,
@@ -112,13 +103,12 @@ class BaseDatasetWorkflow(BaseWorkflow, ABC):
         """
         super().__init__(name=name, verbose=verbose, dry_run=dry_run)
 
-        # `.nipoppy` is not created by default in version 0.3.4 and below
-        self.dpath_root = is_nipoppy_project(dpath_root) or Path(dpath_root)
         self.fpath_layout = fpath_layout
         self._skip_logfile = _skip_logfile
         self._validate_layout = _validate_layout
 
-        self.study = open_dataset(self.dpath_root, self.fpath_layout)
+        self.study = open_dataset(dpath_root, self.fpath_layout)
+        self.dpath_root = self.study.layout.dpath_root
 
     def generate_fpath_log(self, dnames_parent=None, fname_stem=None) -> Path:
         """Generate a log file path."""

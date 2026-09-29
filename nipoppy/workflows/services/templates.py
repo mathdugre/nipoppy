@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 
 from nipoppy.utils.bids import (
     participant_id_to_bids_participant_id,
@@ -22,7 +22,7 @@ class TemplateRenderer:
     def __init__(
         self,
         substitutions: Mapping[str, str] | Callable[[], Mapping[str, str]],
-        values: Mapping[str, Callable[[], object]],
+        values: MutableMapping[str, Callable[[], object]],
         layout,
     ):
         self.substitutions = substitutions

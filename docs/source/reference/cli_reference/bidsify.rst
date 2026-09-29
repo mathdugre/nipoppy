@@ -2,7 +2,7 @@
 ===================
 
 .. note::
-   This command calls the :py:class:`nipoppy.workflows.bids_conversion.BIDSificationRunner` class from the Python :term:`API` internally.
+   This command constructs its workflow through :py:func:`nipoppy.workflows.factories.create_bidsification_workflow`. The CLI options and exit codes are unchanged.
 
 .. click:: nipoppy.cli.cli:bidsify
    :prog: nipoppy bidsify

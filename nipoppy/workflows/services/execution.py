@@ -98,12 +98,11 @@ def iter_results(
     n_jobs=1,
     show_progress=False,
     description="Working...",
-    joblib_installed=JOBLIB_INSTALLED,
 ):
     """Run an ordered batch, optionally with threads and progress reporting."""
     participants_sessions = list(participants_sessions)
     n_total = len(participants_sessions)
-    if joblib_installed:
+    if JOBLIB_INSTALLED:
         wrapper_func = delayed(execute)
     else:
         wrapper_func = execute
@@ -113,7 +112,7 @@ def iter_results(
         for participant_id, session_id in participants_sessions
     )
 
-    if joblib_installed:
+    if JOBLIB_INSTALLED:
         results_generator = Parallel(
             n_jobs=n_jobs,
             backend="threading",
