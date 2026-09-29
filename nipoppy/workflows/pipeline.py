@@ -9,7 +9,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import rich
 from pydantic import ValidationError
 
@@ -38,7 +37,6 @@ from nipoppy.exceptions import (
     ConfigError,
     ContainerError,
     FileOperationError,
-    InvalidArgumentError,
     ReturnCode,
     WorkflowError,
 )
@@ -62,6 +60,12 @@ from nipoppy.workflows.services.artifacts import (
     load_pipeline_config,
     load_pybids_ignore_patterns,
     load_tracker_config,
+)
+from nipoppy.workflows.services.cohort import (
+    apply_analysis_level,
+    check_filter_args,
+    filter_by_subcohort,
+    write_subcohort,
 )
 from nipoppy.workflows.services.templates import TemplateRenderer
 
@@ -532,25 +536,8 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         participants_sessions: Iterable[str],
         analysis_level: AnalysisLevelType,
     ) -> list[tuple[str, str]]:
-        """Filter participant-session pairs to run based on the analysis level."""
-        if analysis_level == AnalysisLevelType.group:
-            return [(None, None)]
-
-        if analysis_level == AnalysisLevelType.participant:
-            participants = []
-            for participant, _ in participants_sessions:
-                if participant not in participants:
-                    participants.append(participant)
-            return [(participant, None) for participant in participants]
-
-        if analysis_level == AnalysisLevelType.session:
-            sessions = []
-            for _, session in participants_sessions:
-                if session not in sessions:
-                    sessions.append(session)
-            return [(None, session) for session in sessions]
-
-        return list(participants_sessions)
+        """Delegate cohort planning to the selection module."""
+        return apply_analysis_level(participants_sessions, analysis_level)
 
     def _handle_execution_strategy(self, participants_sessions):
         """Handle the execution strategy based on the workflow configuration."""
@@ -560,28 +547,12 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
             self._run_locally(participants_sessions)
 
     def _check_filter_args_compatibility(self):
-        """Warn if participant/session ID filters cannot be applied."""
-        analysis_level = self.pipeline_step_config.ANALYSIS_LEVEL
-        ignored_flags = []
-        if self.participant_id is not None and analysis_level in (
-            AnalysisLevelType.group,
-            AnalysisLevelType.session,
-        ):
-            ignored_flags.append("--participant-id")
-        if self.session_id is not None and analysis_level in (
-            AnalysisLevelType.group,
-            AnalysisLevelType.participant,
-        ):
-            ignored_flags.append("--session-id")
-
-        if len(ignored_flags) > 0:
-            raise InvalidArgumentError(
-                (
-                    f"The {' and '.join(ignored_flags)} flag(s) are given, "
-                    f"but the pipeline is run at the {analysis_level.value} level"
-                ),
-                hint="Remove the incompatible flag(s)",
-            )
+        """Delegate cohort planning to the selection module."""
+        return check_filter_args(
+            self.pipeline_step_config.ANALYSIS_LEVEL,
+            self.participant_id,
+            self.session_id,
+        )
 
     def run_main(self):
         """Run the pipeline."""
@@ -601,28 +572,14 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         self._log_summary_message()
 
     def _filter_by_subcohort(self, participants_sessions: Iterable) -> set:
-        """Filter participants/sessions by subcohort file."""
-        try:
-            df_participants_sessions = pd.read_csv(
-                self.use_subcohort, header=None, sep="\t", dtype=str
-            )
-        except FileNotFoundError as e:
-            raise FileOperationError(
-                f"Subcohort file {self.use_subcohort} not found"
-            ) from e
-        except pd.errors.EmptyDataError as e:
-            raise WorkflowError(f"Subcohort file {self.use_subcohort} is empty") from e
-
-        return set(participants_sessions) & set(
-            df_participants_sessions.itertuples(index=False, name=None)
-        )
+        """Delegate cohort planning to the selection module."""
+        return filter_by_subcohort(participants_sessions, self.use_subcohort)
 
     def _write_subcohort_to_file(self, participants_sessions: list) -> None:
-        """Write participants/sessions to file."""
-        if not self.dry_run:
-            pd.DataFrame(participants_sessions).to_csv(
-                self.write_subcohort, header=False, index=False, sep="\t"
-            )
+        """Delegate cohort planning to the selection module."""
+        return write_subcohort(
+            participants_sessions, self.write_subcohort, self.dry_run
+        )
 
     def _run_locally(self, participants_sessions: list) -> None:
         """Run pipeline locally and collect results."""
