@@ -12,20 +12,16 @@ from pathlib import Path
 from typing import Protocol
 
 from nipoppy.base import Base
-from nipoppy.env import EXT_LOG, PROGRAM_NAME, StrOrPathLike
-from nipoppy.exceptions import FileOperationError, ReturnCode
-from nipoppy.layout import DatasetLayout
+from nipoppy.env import StrOrPathLike
+from nipoppy.exceptions import ReturnCode
 from nipoppy.logger import get_logger
-from nipoppy.study import Study
-from nipoppy.tabular.curation_status import (
-    CurationStatusTable,
-    generate_curation_status_table,
-)
-from nipoppy.tabular.dicom_dir_map import DicomDirMap
-from nipoppy.tabular.processing_status import ProcessingStatusTable
 from nipoppy.utils.utils import (
-    add_path_timestamp,
     is_nipoppy_project,
+)
+from nipoppy.workflows.services.dataset import (
+    DatasetAccess,
+    generate_log_path,
+    open_dataset,
 )
 
 logger = get_logger()
@@ -246,29 +242,18 @@ class BaseDatasetWorkflow(BaseWorkflow, ABC):
         self._skip_logfile = _skip_logfile
         self._validate_layout = _validate_layout
 
-        self.study = Study(
-            DatasetLayout(
-                dpath_root=self.dpath_root,
-                fpath_config=self.fpath_layout,
-            )
+        self.study = open_dataset(self.dpath_root, self.fpath_layout)
+
+    def generate_fpath_log(self, dnames_parent=None, fname_stem=None) -> Path:
+        """Generate a log file path."""
+        return generate_log_path(
+            self.study.layout, self.name, dnames_parent, fname_stem
         )
 
-    def generate_fpath_log(
-        self,
-        dnames_parent: str | list[str] | None = None,
-        fname_stem: str | None = None,
-    ) -> Path:
-        """Generate a log file path."""
-        if dnames_parent is None:
-            dnames_parent = []
-        if isinstance(dnames_parent, str):
-            dnames_parent = [dnames_parent]
-        if fname_stem is None:
-            fname_stem = self.name
-        dpath_log = self.study.layout.dpath_logs / PROGRAM_NAME / self.name
-        for dname in dnames_parent:
-            dpath_log = dpath_log / dname
-        return dpath_log / add_path_timestamp(f"{fname_stem}{EXT_LOG}")
+    @cached_property
+    def dataset(self) -> DatasetAccess:
+        """Dataset access shared with composed workflows."""
+        return DatasetAccess(self.study, dry_run=self.dry_run)
 
     def run_setup(self):
         """Run the setup part of the workflow."""
@@ -281,61 +266,16 @@ class BaseDatasetWorkflow(BaseWorkflow, ABC):
         super().run_setup()
 
     @cached_property
-    def curation_status_table(self) -> CurationStatusTable:
-        """
-        Load the curation status file if it exists.
-
-        Otherwise, generate a new one.
-        """
-        fpath_table = Path(self.study.layout.fpath_curation_status)
-        try:
-            return self.study.curation_status_table
-        except FileNotFoundError:
-            logger.warning(
-                f"Curation status file not found: {fpath_table}"
-                ". Generating a new one on-the-fly"
-            )
-            table = generate_curation_status_table(
-                manifest=self.study.manifest,
-                dicom_dir_map=self.dicom_dir_map,
-                dpath_downloaded=self.study.layout.dpath_pre_reorg,
-                dpath_organized=self.study.layout.dpath_post_reorg,
-                dpath_bidsified=self.study.layout.dpath_bids,
-            )
-
-            if not self.dry_run:
-                table.save_with_backup(fpath_table)
-            else:
-                logger.info(
-                    "Not writing curation status table to "
-                    f"{fpath_table} since this is a dry run"
-                )
-
-            return table
+    def curation_status_table(self):
+        """Read the dataset table using its missing-file fallback."""
+        return self.dataset.curation_status_table
 
     @cached_property
-    def processing_status_table(self) -> ProcessingStatusTable:
-        """
-        Load the processing status file it it exists.
-
-        Otherwise, return an empty processing status table.
-        """
-        try:
-            return self.study.processing_status_table
-        except FileNotFoundError:
-            return ProcessingStatusTable()
+    def processing_status_table(self):
+        """Read the dataset table using its missing-file fallback."""
+        return self.dataset.processing_status_table
 
     @cached_property
-    def dicom_dir_map(self) -> DicomDirMap:
-        """Get the DICOM directory mapping."""
-        fpath_dicom_dir_map = self.study.config.DICOM_DIR_MAP_FILE
-        if fpath_dicom_dir_map is not None and not Path(fpath_dicom_dir_map).exists():
-            raise FileOperationError(
-                f"DICOM directory map file not found: {fpath_dicom_dir_map}"
-            )
-
-        return DicomDirMap.load_or_generate(
-            manifest=self.study.manifest,
-            fpath_dicom_dir_map=fpath_dicom_dir_map,
-            participant_first=self.study.config.DICOM_DIR_PARTICIPANT_FIRST,
-        )
+    def dicom_dir_map(self):
+        """Read the dataset table using its missing-file fallback."""
+        return self.dataset.dicom_dir_map

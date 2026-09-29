@@ -116,7 +116,7 @@ def test_curation_status_file_generated_if_not_found(
     workflow: BaseDatasetWorkflow, mocker: pytest_mock.MockFixture
 ):
     mocked = mocker.patch(
-        "nipoppy.workflows.base.generate_curation_status_table",
+        "nipoppy.workflows.services.dataset.generate_curation_status_table",
         return_value=CurationStatusTable(),
     )
     assert not workflow.study.layout.fpath_curation_status.exists()
