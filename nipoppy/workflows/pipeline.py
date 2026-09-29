@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -12,7 +11,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import rich
-from packaging.version import Version
 from pydantic import ValidationError
 
 from nipoppy.config.boutiques import (
@@ -44,7 +42,6 @@ from nipoppy.exceptions import (
     ReturnCode,
     WorkflowError,
 )
-from nipoppy.layout import DatasetLayout
 from nipoppy.logger import get_logger
 from nipoppy.utils import fileops
 from nipoppy.utils.bids import (
@@ -55,9 +52,17 @@ from nipoppy.utils.bids import (
 )
 from nipoppy.utils.utils import (
     get_pipeline_tag,
-    load_json,
 )
 from nipoppy.workflows.base import BaseDatasetWorkflow
+from nipoppy.workflows.services.artifacts import (
+    check_pipeline_variables,
+    get_pipeline_version,
+    load_descriptor,
+    load_invocation,
+    load_pipeline_config,
+    load_pybids_ignore_patterns,
+    load_tracker_config,
+)
 from nipoppy.workflows.services.templates import TemplateRenderer
 
 if TYPE_CHECKING:
@@ -74,51 +79,6 @@ except ImportError as error:
         raise
 
 logger = get_logger()
-
-
-def get_pipeline_version(
-    pipeline_name: str,
-    dpath_pipelines: StrOrPathLike,
-) -> str:
-    """Get the latest version associated with a pipeline.
-
-    Parameters
-    ----------
-    pipeline_name : str
-        Name of the pipeline, as specified in the config
-    dpath_pipelines : nipoppy.env.StrOrPathLike
-        Path to directory containing pipeline bundle subdirectories
-
-    Returns
-    -------
-    str
-        The pipeline version
-    """
-    installed_pipelines = []
-    pipeline_config_latest = None
-    for fpath_pipeline_config in Path(dpath_pipelines).glob(
-        f"*/{DatasetLayout.fname_pipeline_config}"
-    ):
-        pipeline_config = BasePipelineConfig(
-            **load_json(fpath_pipeline_config, allow_json5=True)
-        )
-        if pipeline_config.NAME == pipeline_name:
-            if pipeline_config_latest is None:
-                pipeline_config_latest = pipeline_config
-            elif Version(pipeline_config.VERSION) > Version(
-                pipeline_config_latest.VERSION
-            ):
-                pipeline_config_latest = pipeline_config
-        installed_pipelines.append((pipeline_config.NAME, pipeline_config.VERSION))
-
-    if pipeline_config_latest is not None:
-        return pipeline_config_latest.VERSION
-    else:
-        raise WorkflowError(
-            f"No config found for pipeline with NAME={pipeline_name}"
-            ". Installed pipelines: "
-            + ", ".join(f"{name} {version}" for name, version in installed_pipelines)
-        )
 
 
 class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
@@ -305,85 +265,43 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
 
     @cached_property
     def descriptor(self) -> dict:
-        """Load the pipeline step's Boutiques descriptor."""
-        if (fname_descriptor := self.pipeline_step_config.DESCRIPTOR_FILE) is None:
-            raise ConfigError(
-                "No descriptor file specified for pipeline"
-                f" {self.pipeline_name} {self.pipeline_version}"
-            )
-        fpath_descriptor = self.dpath_pipeline_bundle / fname_descriptor
-        logger.info(f"Loading descriptor from {fpath_descriptor}")
-        descriptor = load_json(fpath_descriptor)
-        descriptor = self.study.config.apply_pipeline_variables(
-            pipeline_type=self.pipeline_config.PIPELINE_TYPE,
-            pipeline_name=self.pipeline_config.NAME,
-            pipeline_version=self.pipeline_config.VERSION,
-            json_obj=descriptor,
+        """Delegate pipeline loading to the artifact module."""
+        return load_descriptor(
+            self.study,
+            self.pipeline_config,
+            self.pipeline_step_config,
+            self.dpath_pipeline_bundle,
         )
-        return descriptor
 
     @cached_property
     def invocation(self) -> dict:
-        """Load the pipeline step's Boutiques invocation."""
-        if (fname_invocation := self.pipeline_step_config.INVOCATION_FILE) is None:
-            raise ConfigError(
-                "No invocation file specified for pipeline"
-                f" {self.pipeline_name} {self.pipeline_version}"
-            )
-        fpath_invocation = self.dpath_pipeline_bundle / fname_invocation
-        logger.info(f"Loading invocation from {fpath_invocation}")
-        invocation = load_json(fpath_invocation)
-
-        invocation = self.study.config.apply_pipeline_variables(
-            pipeline_type=self.pipeline_config.PIPELINE_TYPE,
-            pipeline_name=self.pipeline_config.NAME,
-            pipeline_version=self.pipeline_config.VERSION,
-            json_obj=invocation,
+        """Delegate pipeline loading to the artifact module."""
+        return load_invocation(
+            self.study,
+            self.pipeline_config,
+            self.pipeline_step_config,
+            self.dpath_pipeline_bundle,
         )
-        return invocation
 
     @cached_property
     def tracker_config(self) -> TrackerConfig:
-        """Load the pipeline step's tracker configuration."""
-        if (
-            fname_tracker_config := self.pipeline_step_config.TRACKER_CONFIG_FILE
-        ) is None:
-            raise ConfigError(
-                f"No tracker config file specified for pipeline {self.pipeline_name}"
-                f" {self.pipeline_version}"
-            )
-        fpath_tracker_config = self.dpath_pipeline_bundle / fname_tracker_config
-        logger.info(f"Loading tracker config from {fpath_tracker_config}")
-        return TrackerConfig(**load_json(fpath_tracker_config, allow_json5=True))
+        """Delegate pipeline loading to the artifact module."""
+        return load_tracker_config(
+            self.study,
+            self.pipeline_config,
+            self.pipeline_step_config,
+            self.dpath_pipeline_bundle,
+        )
 
     @cached_property
     def pybids_ignore_patterns(self) -> list[str]:
-        """
-        Load the pipeline step's PyBIDS ignore pattern list.
-
-        Note: this does not apply any substitutions, since the subject/session
-        patterns are always added.
-        """
-        # no file specified
-        if (
-            fname_pybids_ignore := self.pipeline_step_config.PYBIDS_IGNORE_FILE
-        ) is None:
-            return []
-
-        fpath_pybids_ignore = self.dpath_pipeline_bundle / fname_pybids_ignore
-
-        # load patterns from file
-        logger.info(f"Loading PyBIDS ignore patterns from {fpath_pybids_ignore}")
-        patterns = load_json(fpath_pybids_ignore, allow_json5=True)
-
-        # validate format
-        if not isinstance(patterns, list):
-            raise ConfigError(
-                f"Expected a list of strings in {fpath_pybids_ignore}"
-                f", got {patterns} ({type(patterns)})"
-            )
-
-        return [re.compile(pattern) for pattern in patterns]
+        """Delegate pipeline loading to the artifact module."""
+        return load_pybids_ignore_patterns(
+            self.study,
+            self.pipeline_config,
+            self.pipeline_step_config,
+            self.dpath_pipeline_bundle,
+        )
 
     @cached_property
     def boutiques_config(self):
@@ -418,38 +336,16 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
         pipeline_version: str,
         pipeline_class: type[BasePipelineConfig],
     ) -> BasePipelineConfig:
-        """Get the config for a pipeline."""
-        fpath_config = dpath_pipeline_bundle / self.study.layout.fname_pipeline_config
-        if not fpath_config.exists():
-            raise FileOperationError(
-                f"Pipeline config file not found at {fpath_config} for "
-                f"pipeline: {pipeline_name} {pipeline_version}"
-            )
-
-        # NOTE: user-defined substitutions take precedence over the pipeline variables
-        pipeline_config_json = self.study.config.apply_pipeline_variables(
-            pipeline_type=self._pipeline_type,
-            pipeline_name=pipeline_name,
-            pipeline_version=pipeline_version,
-            json_obj=self.process_template_json(
-                load_json(fpath_config, allow_json5=True),
-            ),
+        """Delegate pipeline loading to the artifact module."""
+        return load_pipeline_config(
+            self.study,
+            self._pipeline_type,
+            self.process_template_json,
+            dpath_pipeline_bundle,
+            pipeline_name,
+            pipeline_version,
+            pipeline_class,
         )
-
-        pipeline_config = pipeline_class(**pipeline_config_json)
-
-        # make sure the config is for the correct pipeline
-        if not (
-            pipeline_config.NAME == pipeline_name
-            and pipeline_config.VERSION == pipeline_version
-        ):
-            raise WorkflowError(
-                f'Expected pipeline config to have NAME="{pipeline_name}" '
-                f'and VERSION="{pipeline_version}", got "{pipeline_config.NAME}" and '
-                f'"{pipeline_config.VERSION}" instead'
-            )
-
-        return self.study.config.propagate_container_config_to_pipeline(pipeline_config)
 
     def process_template_json(self, template_json, **kwargs):
         """Render with the legacy workflow namespace during migration."""
@@ -554,17 +450,10 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
             )
 
     def _check_pipeline_variables(self):
-        """Check that the pipeline variables are not null in the config."""
-        for name, value in self.study.config.PIPELINE_VARIABLES.get_variables(
-            self._pipeline_type, self.pipeline_name, self.pipeline_version
-        ).items():
-            if value is None:
-                raise ConfigError(
-                    f"Variable {name} is not set in the config for pipeline "
-                    f"{self.pipeline_name}, version {self.pipeline_version}. You need "
-                    "to set it in the PIPELINE_VARIABLES section of the config file at "
-                    f"{self.study.layout.fpath_config}"
-                )
+        """Delegate pipeline loading to the artifact module."""
+        return check_pipeline_variables(
+            self.study, self._pipeline_type, self.pipeline_name, self.pipeline_version
+        )
 
     def check_pipeline_step(self):
         """Set the pipeline step name based on the config if it is not given."""
