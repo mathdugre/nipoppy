@@ -111,14 +111,11 @@ def create_extraction_workflow(
     """Construct the extraction workflow from normalized CLI parameters."""
     from nipoppy.workflows.extractor import ExtractionRunner
 
-    return ExtractionRunner(
-        dpath_root=dpath_root,
-        pipeline_name=pipeline_name,
-        pipeline_version=pipeline_version,
-        pipeline_step=pipeline_step,
-        participant_id=participant_id,
-        session_id=session_id,
-        use_subcohort=use_subcohort,
+    request = PipelineRequest(
+        PipelineTypeEnum.EXTRACTION, pipeline_name, pipeline_version, pipeline_step
+    )
+    selection = SelectionOptions(participant_id, session_id, use_subcohort)
+    execution = ExecutionOptions(
         simulate=simulate,
         keep_workdir=keep_workdir,
         hpc=hpc,
@@ -126,6 +123,11 @@ def create_extraction_workflow(
         fpath_layout=fpath_layout,
         verbose=verbose,
         dry_run=dry_run,
+    )
+    return ExtractionRunner(
+        **create_pipeline_dependencies(
+            dpath_root, "extract", request, selection, execution
+        )
     )
 
 

@@ -18,6 +18,8 @@ from nipoppy.utils.bids import (
     session_id_to_bids_session_id,
 )
 from nipoppy.workflows.extractor import ExtractionRunner
+from nipoppy.workflows.factories import create_extraction_workflow
+from nipoppy.workflows.services.cohort import SelectionOptions, WorkItem
 from tests.conftest import (
     create_empty_dataset,
     create_pipeline_config_files,
@@ -27,16 +29,16 @@ from tests.conftest import (
 
 @pytest.fixture(scope="function")
 def extractor(tmp_path: Path) -> ExtractionRunner:
-    extractor = ExtractionRunner(
+    extractor = create_extraction_workflow(
         dpath_root=tmp_path / "my_dataset",
         pipeline_name="fs_extractor",
         pipeline_version="2.0.0",
         pipeline_step=DEFAULT_PIPELINE_STEP_NAME,
     )
-    extractor.study.config = get_config()
-    create_empty_dataset(extractor.dpath_root)
+    extractor.dataset.study.config = get_config()
+    create_empty_dataset(extractor.dataset.study.layout.dpath_root)
     create_pipeline_config_files(
-        extractor.study.layout.dpath_pipelines,
+        extractor.dataset.study.layout.dpath_pipelines,
         processing_pipelines=[
             {
                 "NAME": "freesurfer",
@@ -82,41 +84,44 @@ def extractor(tmp_path: Path) -> ExtractionRunner:
 @pytest.mark.parametrize(
     "attribute,expected",
     [
-        ("dpath_pipeline", "derivatives/freesurfer/7.3.2"),
-        ("dpath_pipeline_output", "derivatives/freesurfer/7.3.2/output"),
-        ("dpath_pipeline_idp", "derivatives/freesurfer/7.3.2/idp"),
+        ("derivatives", "derivatives/freesurfer/7.3.2"),
+        ("output", "derivatives/freesurfer/7.3.2/output"),
+        ("idp", "derivatives/freesurfer/7.3.2/idp"),
     ],
 )
 def test_paths(extractor: ExtractionRunner, attribute, expected):
-    assert getattr(extractor, attribute) == extractor.dpath_root / expected
+    assert (
+        getattr(extractor, attribute)
+        == extractor.dataset.study.layout.dpath_root / expected
+    )
 
 
 def test_setup(extractor: ExtractionRunner):
-    assert not extractor.dpath_pipeline_idp.exists()
+    assert not extractor.idp.exists()
     extractor.run_setup()
-    assert extractor.dpath_pipeline_idp.exists()
+    assert extractor.idp.exists()
 
 
 def test_dpath_pipeline(extractor: ExtractionRunner):
     assert (
-        extractor.dpath_pipeline
-        == extractor.study.layout.dpath_derivatives / "freesurfer" / "7.3.2"
+        extractor.derivatives
+        == extractor.dataset.study.layout.dpath_derivatives / "freesurfer" / "7.3.2"
     )
 
 
 def test_proc_pipeline_info(extractor: ExtractionRunner):
     # check that proc_pipeline_info calls _get_pipeline_config with the
     # correct pipeline_class
-    assert isinstance(extractor.proc_pipeline_info, PipelineInfo)
+    assert isinstance(extractor.source, PipelineInfo)
 
 
 def test_proc_pipeline_info_error(extractor: ExtractionRunner):
     bad_version = "invalid_version"
-    extractor.pipeline_config.PROC_DEPENDENCIES[0].VERSION = bad_version
+    extractor.pipeline.config.PROC_DEPENDENCIES[0].VERSION = bad_version
     with pytest.raises(
         FileOperationError, match=f"Pipeline config file not found at .* {bad_version}"
     ):
-        extractor.proc_pipeline_info
+        extractor.source
 
 
 @pytest.mark.parametrize(
@@ -226,10 +231,10 @@ def test_get_participants_sessions_to_run(
     expected,
     extractor: ExtractionRunner,
 ):
-    extractor.pipeline_name = pipeline_name
-    extractor.pipeline_version = pipeline_version
-    extractor.pipeline_step = DEFAULT_PIPELINE_STEP_NAME
-    extractor.processing_status_table = ProcessingStatusTable().add_or_update_records(
+    extractor.pipeline.name = pipeline_name
+    extractor.pipeline.version = pipeline_version
+    extractor.pipeline.step_name = DEFAULT_PIPELINE_STEP_NAME
+    extractor.dataset.processing_status_table = ProcessingStatusTable().add_or_update_records(
         records=[
             {
                 ProcessingStatusTable.col_participant_id: data[0],
@@ -248,65 +253,39 @@ def test_get_participants_sessions_to_run(
             for data in processing_status_data
         ]
     )
-    assert [
-        tuple(x)
-        for x in extractor.get_participants_sessions_to_run(
-            participant_id=participant_id, session_id=session_id
-        )
-    ] == expected
+    extractor.selection = SelectionOptions(participant_id, session_id)
+    assert list(extractor.select_candidates()) == expected
 
 
 def test_run_single(
     extractor: ExtractionRunner,
     mocker: pytest_mock.MockerFixture,
 ):
-    mocked_process_container_config = mocker.patch.object(
-        extractor,
-        "process_container_config",
-        # usually returns string and config object
-        return_value=(None, mocker.MagicMock()),
+    mocked_execute = mocker.patch.object(extractor, "execute_pipeline")
+    extractor.execute_item(WorkItem("S01", "BL"))
+    mocked_execute.assert_called_once_with(
+        WorkItem("S01", "BL"), [extractor.idp, extractor.output]
     )
-    mocked_launch_boutiques_container = mocker.patch.object(
-        extractor,
-        "launch_boutiques_run",
-    )
-
-    extractor.run_single("S01", "BL")
-    assert mocked_process_container_config.call_count == 1
-    mocked_process_container_config.assert_called_once_with(
-        participant_id="S01",
-        session_id="BL",
-        bind_paths=[extractor.dpath_pipeline_idp, extractor.dpath_pipeline_output],
-    )
-    assert mocked_launch_boutiques_container.call_count == 1
 
 
 def test_check_pipeline_version(extractor: ExtractionRunner):
-    extractor.pipeline_name = "fs_extractor"
-    extractor.pipeline_version = None
+    extractor.pipeline.name = "fs_extractor"
+    extractor.pipeline.version = None
 
-    extractor.check_pipeline_version()
-    assert extractor.pipeline_version == "2.0.0"
+    extractor.pipeline.resolve_version()
+    assert extractor.pipeline.version == "2.0.0"
 
 
 def test_pipeline_config(extractor: ExtractionRunner):
-    assert isinstance(extractor.pipeline_config, ExtractionPipelineConfig)
+    assert isinstance(extractor.pipeline.config, ExtractionPipelineConfig)
 
 
 def test_pipeline_step_config(extractor: ExtractionRunner):
-    assert isinstance(extractor.pipeline_step_config, ExtractionPipelineStepConfig)
+    assert isinstance(extractor.pipeline.step, ExtractionPipelineStepConfig)
 
 
 def test_generate_cli_command_for_hpc(
     extractor: ExtractionRunner,
     mocker: pytest_mock.MockFixture,
 ):
-    mocked_generate_cli_command = mocker.patch.object(
-        extractor.hpc_runner,
-        "generate_cli_command",
-    )
-    extractor._generate_cli_command_for_hpc("p01", "s01")
-    mocked_generate_cli_command.assert_called_once_with(
-        participant_id="p01",
-        session_id="s01",
-    )
+    assert extractor.hpc_extra_flags() == []
