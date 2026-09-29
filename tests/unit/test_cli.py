@@ -615,9 +615,20 @@ def test_cli_params_match_workflows(command_name):
     module = importlib.import_module(module_path)
     workflow_class = getattr(module, workflow_name)
 
+    construction = workflow_class.__init__
+    if command_name in ("process", "bidsify", "extract"):
+        from nipoppy.workflows import factories
+
+        factory_names = {
+            "process": "create_processing_workflow",
+            "bidsify": "create_bidsification_workflow",
+            "extract": "create_extraction_workflow",
+        }
+        construction = getattr(factories, factory_names[command_name])
+
     params_workflow = {
         p.name
-        for p in inspect.signature(workflow_class.__init__).parameters.values()
+        for p in inspect.signature(construction).parameters.values()
         if (
             p.name != "self"
             and not p.name.startswith("_")

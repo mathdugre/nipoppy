@@ -4,9 +4,8 @@ Baseline: `maint/flat-workflows`, commit
 `67dd5223362828a55a4f54158ff8476ddc0d318f`.
 
 This stage adds tests around current behavior. It does not change workflows,
-constructors, configuration formats, or the inheritance hierarchy. Stage 2 begins
-only after the user has reviewed this stage, created its PR, and authorized
-continuation.
+constructors, configuration formats, or the inheritance hierarchy. Subsequent stages are implemented and committed separately; the user reviews the
+complete commit series at the end.
 
 ## Test approach
 

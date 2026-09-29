@@ -220,10 +220,10 @@ def reorg(**params):
 @layout_option
 def bidsify(**params):
     """Run a BIDS conversion pipeline."""
-    from nipoppy.workflows.bids_conversion import BIDSificationRunner
+    from nipoppy.workflows.factories import create_bidsification_workflow
 
     params = dep_params(**params)
-    with exception_handler(BIDSificationRunner(**params)) as workflow:
+    with exception_handler(create_bidsification_workflow(**params)) as workflow:
         workflow.run()
 
 
@@ -243,10 +243,10 @@ def bidsify(**params):
 @layout_option
 def process(**params):
     """Run a processing pipeline."""
-    from nipoppy.workflows.processing_runner import ProcessingRunner
+    from nipoppy.workflows.factories import create_processing_workflow
 
     params = dep_params(**params)
-    with exception_handler(ProcessingRunner(**params)) as workflow:
+    with exception_handler(create_processing_workflow(**params)) as workflow:
         workflow.run()
 
 
@@ -277,10 +277,10 @@ def track_processing(**params):
 @layout_option
 def extract(**params):
     """Extract imaging-derived phenotypes (IDPs) from processed data."""
-    from nipoppy.workflows.extractor import ExtractionRunner
+    from nipoppy.workflows.factories import create_extraction_workflow
 
     params = dep_params(**params)
-    with exception_handler(ExtractionRunner(**params)) as workflow:
+    with exception_handler(create_extraction_workflow(**params)) as workflow:
         workflow.run()
 
 
