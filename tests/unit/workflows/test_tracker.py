@@ -2,6 +2,8 @@
 
 import json
 import logging
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -10,13 +12,16 @@ import pytest_mock
 
 from nipoppy.config.pipeline_step import AnalysisLevelType
 from nipoppy.env import DEFAULT_PIPELINE_STEP_NAME
+from nipoppy.exceptions import InvalidArgumentError, ReturnCode
 from nipoppy.tabular.curation_status import CurationStatusTable
 from nipoppy.tabular.manifest import Manifest
 from nipoppy.tabular.processing_status import ProcessingStatusTable
+from nipoppy.workflows import base
 from nipoppy.workflows.services.archive import tar_directory
 from nipoppy.workflows.services.execution import BatchResult
 from nipoppy.workflows.tracker import PipelineTracker
 from tests.conftest import (
+    MOCKED_DATETIME,
     create_empty_dataset,
     create_pipeline_config_files,
     get_config,
@@ -364,3 +369,223 @@ def test_run_no_rm_work_directory(tracker: PipelineTracker):
     tracker.workspace.work.mkdir(parents=True)
     tracker.run()
     assert tracker.workspace.work.exists()
+
+
+def test_construction_is_lazy_and_reuses_study(tmp_path, mocker):
+    opened = mocker.spy(base, "open_dataset")
+    for loader in [
+        "load_pipeline_config",
+        "load_tracker_config",
+        "load_descriptor",
+        "load_invocation",
+    ]:
+        mocker.patch(
+            f"nipoppy.workflows.services.artifacts.{loader}",
+            side_effect=AssertionError("Construction must not load artifacts"),
+        )
+    tracker = PipelineTracker(tmp_path / "missing", "uninstalled")
+
+    assert "uninstalled" in str(tracker)
+    opened.assert_called_once()
+    assert tracker.dataset.study is tracker.study
+    assert tracker.pipeline.study is tracker.study
+    assert tracker.workspace.layout is tracker.study.layout
+    assert "config" not in tracker.study.__dict__
+    assert "manifest" not in tracker.study.__dict__
+    assert "processing_status_table" not in tracker.__dict__
+    assert "derivatives" not in tracker.__dict__
+    assert "output" not in tracker.__dict__
+    assert tracker.result.n_total == 0
+    assert tracker.execution.skip_logfile and tracker.execution.show_progress
+    assert not tracker.dpath_root.exists()
+
+
+@pytest.mark.parametrize("version", [None, "0.1.0"])
+@pytest.mark.parametrize("step", [None, DEFAULT_PIPELINE_STEP_NAME])
+def test_setup_resolves_omitted_identity(tracker, version, step, mocker):
+    create_pipeline_config_files(
+        tracker.study.layout.dpath_pipelines,
+        processing_pipelines=[
+            {
+                "NAME": tracker.pipeline.name,
+                "VERSION": "0.2.0",
+                "STEPS": [
+                    {"NAME": "track"},
+                    {"NAME": DEFAULT_PIPELINE_STEP_NAME},
+                ],
+            }
+        ],
+    )
+    workflow = PipelineTracker(tracker.dpath_root, tracker.pipeline.name, version, step)
+    workflow.study.config = tracker.study.config
+    file_handler = mocker.patch("nipoppy.workflows.base.logger.add_file_handler")
+    workflow.run_setup()
+
+    assert workflow.pipeline.version == (version or "0.2.0")
+    assert workflow.pipeline.step_name == (
+        "track" if version is None and step is None else DEFAULT_PIPELINE_STEP_NAME
+    )
+    assert workflow.processing_status_table.empty
+    assert workflow.output == workflow.study.layout.get_dpath_pipeline_output(
+        workflow.pipeline.name, workflow.pipeline.version
+    )
+    file_handler.assert_not_called()
+
+
+def _set_bidsified_pairs(tracker):
+    tracker.curation_status_table = CurationStatusTable().add_or_update_records(
+        [
+            {
+                "participant_id": participant,
+                "session_id": session,
+                "visit_id": session,
+                "datatype": None,
+                "participant_dicom_dir": "",
+                "in_pre_reorg": False,
+                "in_post_reorg": False,
+                "in_bids": True,
+            }
+            for participant, session in [
+                ("01", "1"),
+                ("01", "2"),
+                ("02", "1"),
+                ("02", "2"),
+            ]
+        ]
+    )
+
+
+@pytest.mark.parametrize("analysis_level", tuple(AnalysisLevelType))
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_run_persists_complete_ordered_status_serial_and_parallel(
+    tracker, analysis_level, dry_run
+):
+    _set_bidsified_pairs(tracker)
+    tracker.pipeline.step.ANALYSIS_LEVEL = analysis_level
+    tracker.dry_run = dry_run
+    for path in ["01/ses-1/results.txt", "file.txt"]:
+        output = tracker.output / path
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.touch()
+
+    results = []
+    for n_jobs in [1, 2]:
+        tracker.execution = replace(tracker.execution, n_jobs=n_jobs)
+        tracker.run()
+        results.append(tracker.result)
+        assert tracker.return_code == ReturnCode.SUCCESS
+        assert tracker.result.n_success == tracker.result.n_total == 4
+        assert [
+            (record["participant_id"], record["session_id"])
+            for record in tracker.result.payloads
+        ] == [("01", "1"), ("01", "2"), ("02", "1"), ("02", "2")]
+        assert [record["status"] for record in tracker.result.payloads] == [
+            ProcessingStatusTable.status_success,
+            *[ProcessingStatusTable.status_fail] * 3,
+        ]
+        expected = ProcessingStatusTable().add_or_update_records(
+            tracker.result.payloads
+        )
+        assert tracker.processing_status_table.equals(expected)
+        assert tracker.study.layout.fpath_processing_status.exists() == (not dry_run)
+        if not dry_run:
+            saved = ProcessingStatusTable.load(
+                tracker.study.layout.fpath_processing_status
+            )
+            pd.testing.assert_frame_equal(saved, expected[saved.columns])
+    assert results[0] == results[1]
+
+
+@pytest.mark.parametrize("analysis_level", tuple(AnalysisLevelType))
+def test_run_empty_selection(tracker, analysis_level):
+    tracker.pipeline.step.ANALYSIS_LEVEL = analysis_level
+    tracker.curation_status_table = CurationStatusTable()
+    tracker.run()
+
+    assert tracker.result.n_total == tracker.result.n_success == 0
+    assert tracker.result.payloads == ()
+    assert tracker.return_code == ReturnCode.NO_PARTICIPANTS_OR_SESSIONS_TO_RUN
+    assert ProcessingStatusTable.load(
+        tracker.study.layout.fpath_processing_status
+    ).empty
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_run_main_isolates_item_exception(tracker, n_jobs, mocker):
+    _set_bidsified_pairs(tracker)
+    tracker.execution = replace(tracker.execution, n_jobs=n_jobs)
+    run_single = tracker.run_single
+
+    def execute(participant, session):
+        if (participant, session) == ("01", "2"):
+            raise RuntimeError("item error")
+        return run_single(participant, session)
+
+    mocker.patch.object(tracker, "run_single", side_effect=execute)
+    # Test execution independently of the existing persistence policy for None payloads.
+    update = mocker.patch.object(tracker, "_update_status_file")
+    tracker.run()
+
+    assert tracker.result.n_total == 4
+    assert tracker.result.n_success == 3
+    assert tracker.result.payloads[1] is None
+    assert tracker.result.payloads[2]["participant_id"] == "02"
+    assert tracker.return_code == ReturnCode.PARTIAL_SUCCESS
+    update.assert_called_once()
+
+
+def test_run_retains_status_for_other_pipelines_and_backup(tracker, datetime_fixture):
+    _set_bidsified_pairs(tracker)
+    original = ProcessingStatusTable().add_or_update_records(
+        {
+            "participant_id": "01",
+            "session_id": "1",
+            "pipeline_name": "other_pipeline",
+            "pipeline_version": "1.0",
+            "pipeline_step": "other_step",
+            "status": ProcessingStatusTable.status_success,
+        }
+    )
+    original.save_with_backup(tracker.study.layout.fpath_processing_status)
+    previous_backup = tracker.study.layout.fpath_processing_status.resolve()
+    previous_bytes = previous_backup.read_bytes()
+    datetime_fixture.datetime.now.return_value = MOCKED_DATETIME + timedelta(minutes=1)
+    tracker.run()
+
+    saved = ProcessingStatusTable.load(tracker.study.layout.fpath_processing_status)
+    assert len(saved) == 5
+    assert (
+        saved[saved["pipeline_name"] == "other_pipeline"]
+        .reset_index(drop=True)
+        .equals(original)
+    )
+    assert tracker.study.layout.fpath_processing_status.resolve() != previous_backup
+    assert previous_backup.read_bytes() == previous_bytes
+
+
+@pytest.mark.parametrize(
+    "analysis_level,participant,session",
+    [
+        (AnalysisLevelType.group, "01", None),
+        (AnalysisLevelType.participant, None, "1"),
+        (AnalysisLevelType.session, "01", None),
+    ],
+)
+def test_setup_rejects_incompatible_filters(
+    tracker, analysis_level, participant, session
+):
+    tracker.pipeline.step.ANALYSIS_LEVEL = analysis_level
+    tracker.selection = replace(
+        tracker.selection, participant_id=participant, session_id=session
+    )
+    with pytest.raises(InvalidArgumentError):
+        tracker.run_setup()
+
+
+@pytest.mark.parametrize("stage", ["run_setup", "run_main"])
+def test_run_cleans_up_after_failure(tracker, stage, mocker):
+    mocker.patch.object(tracker, stage, side_effect=RuntimeError("workflow error"))
+    cleanup = mocker.patch.object(tracker, "run_cleanup")
+    with pytest.raises(RuntimeError, match="workflow error"):
+        tracker.run()
+    cleanup.assert_called_once()

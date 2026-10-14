@@ -2,20 +2,30 @@
 
 import tarfile
 from collections.abc import Iterable
+from functools import cached_property
 from pathlib import Path
 
 from nipoppy.config.pipeline_step import AnalysisLevelType
 from nipoppy.config.tracker import TrackerConfig
-from nipoppy.env import EXT_TAR, StrOrPathLike
+from nipoppy.env import EXT_TAR, PipelineTypeEnum, StrOrPathLike
 from nipoppy.exceptions import NipoppyError
 from nipoppy.logger import get_logger
 from nipoppy.tabular.processing_status import ProcessingStatusTable
-from nipoppy.workflows.pipeline import BasePipelineWorkflow
+from nipoppy.workflows.base import BaseDatasetWorkflow
+from nipoppy.workflows.factories import create_pipeline_dependencies
+from nipoppy.workflows.services.cohort import SelectionOptions, check_filter_args
+from nipoppy.workflows.services.execution import (
+    BatchResult,
+    execute_locally,
+    log_summary,
+    require_parallel_support,
+)
+from nipoppy.workflows.services.models import ExecutionOptions, PipelineRequest
 
 logger = get_logger()
 
 
-class PipelineTracker(BasePipelineWorkflow):
+class PipelineTracker(BaseDatasetWorkflow):
     """Pipeline tracker."""
 
     progress_bar_description = "Tracking..."
@@ -36,22 +46,87 @@ class PipelineTracker(BasePipelineWorkflow):
         super().__init__(
             dpath_root=dpath_root,
             name="track_processing",
-            pipeline_name=pipeline_name,
-            pipeline_version=pipeline_version,
-            pipeline_step=pipeline_step,
-            participant_id=participant_id,
-            session_id=session_id,
-            n_jobs=n_jobs,
             fpath_layout=fpath_layout,
             verbose=verbose,
             dry_run=dry_run,
             _skip_logfile=True,
-            _show_progress=True,
+        )
+        dependencies = create_pipeline_dependencies(
+            dpath_root,
+            self.name,
+            PipelineRequest(
+                PipelineTypeEnum.PROCESSING,
+                pipeline_name,
+                pipeline_version,
+                pipeline_step,
+            ),
+            SelectionOptions(participant_id, session_id),
+            ExecutionOptions(
+                n_jobs=n_jobs,
+                skip_logfile=True,
+                show_progress=True,
+                fpath_layout=fpath_layout,
+                verbose=verbose,
+                dry_run=dry_run,
+            ),
+            study=self.study,
+        )
+        self.pipeline = dependencies["pipeline"]
+        self.selection = dependencies["selection"]
+        self.execution = dependencies["execution"]
+        self.templates = dependencies["templates"]
+        self.workspace = dependencies["workspace"]
+        self.dataset = dependencies["dataset"]
+        self.templates.values.update(
+            {
+                "dpath_pipeline": lambda: self.derivatives,
+                "dpath_pipeline_output": lambda: self.output,
+            }
+        )
+        require_parallel_support(n_jobs)
+        self.result = BatchResult()
+        self.templates.values.update(
+            {
+                "n_success": lambda: self.result.n_success,
+                "n_total": lambda: self.result.n_total,
+            }
+        )
+
+    def __str__(self):
+        """Describe requested identity without forcing lazy artifact loading."""
+        return self._str_helper(
+            components=[
+                self.pipeline.name,
+                self.pipeline.version,
+                self.pipeline.step_name,
+            ]
+        )
+
+    @cached_property
+    def derivatives(self) -> Path:
+        """Derivatives root for the pipeline being tracked."""
+        return self.study.layout.get_dpath_pipeline(
+            self.pipeline.name, self.pipeline.version
+        )
+
+    @cached_property
+    def output(self) -> Path:
+        """Output files checked by the concrete tracker."""
+        return self.study.layout.get_dpath_pipeline_output(
+            self.pipeline.name, self.pipeline.version
         )
 
     def run_setup(self):
-        """Load/initialize the processing status file."""
-        rv = super().run_setup()
+        """Validate the dataset and pipeline, then load or initialize status."""
+        super().run_setup()
+        self.pipeline.resolve_version()
+        self.pipeline.check_variables()
+        self.pipeline.resolve_step()
+        check_filter_args(
+            self.pipeline.step.ANALYSIS_LEVEL,
+            self.selection.participant_id,
+            self.selection.session_id,
+        )
         if self.study.layout.fpath_processing_status.exists():
             try:
                 self.processing_status_table = ProcessingStatusTable.load(
@@ -73,7 +148,6 @@ class PipelineTracker(BasePipelineWorkflow):
         else:
             self.processing_status_table = ProcessingStatusTable()
             logger.info("Initialized empty processing status table")
-        return rv
 
     def check_status(
         self,
@@ -179,6 +253,28 @@ class PipelineTracker(BasePipelineWorkflow):
         )
 
     def run_main(self):
-        """Run the tracker workflow."""
-        super().run_main()
+        """Track selected pairs, summarize results and persist status."""
+        items = self.get_participants_sessions_to_run(
+            self.selection.participant_id, self.selection.session_id
+        )
+        items = self.apply_analysis_level(items, self.pipeline.step.ANALYSIS_LEVEL)
+        self.result = execute_locally(
+            items,
+            self.run_single,
+            self.pipeline.name,
+            self.pipeline.version,
+            n_jobs=self.execution.n_jobs,
+            show_progress=self.execution.show_progress,
+            description=self.progress_bar_description,
+        )
+        self.return_code = self.result.return_code
+        code = log_summary(
+            self.result,
+            None,
+            None,
+            self.pipeline.step.ANALYSIS_LEVEL,
+            self.study.layout.fpath_curation_status,
+        )
+        if code is not None:
+            self.return_code = code
         self._update_status_file()

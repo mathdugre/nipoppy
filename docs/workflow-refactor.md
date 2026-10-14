@@ -1,14 +1,16 @@
 # Pipeline workflow refactor: implementation and review guide
 
-The executable processing, BIDSification and extraction workflows now have this
-inheritance chain:
+The executable processing, BIDSification, extraction and tracking workflows now
+have these inheritance chains:
 
 ```text
 BaseWorkflow
-└── PipelineExecutionWorkflow
-    ├── ProcessingRunner
-    ├── BIDSificationRunner
-    └── ExtractionRunner
+├── PipelineExecutionWorkflow
+│   ├── ProcessingRunner
+│   ├── BIDSificationRunner
+│   └── ExtractionRunner
+└── BaseDatasetWorkflow
+    └── PipelineTracker
 ```
 
 `nipoppy.base.Base` still supplies string representations. It adds no workflow
@@ -47,6 +49,7 @@ Those runner compatibility methods are removed in stage 14.
 | --- | --- | --- |
 | `workflows/base.py` | Workflow lifecycle and logging; the dataset compatibility base used by unrelated workflows. | Pipeline execution policies. |
 | `workflows/execution.py` | Setup/main sequencing, strategy dispatch, outcome application and explicit domain hooks. | Concrete runner types. |
+| `workflows/tracker.py` | Tracking dependency assembly, pipeline/filter setup, participant/session selection, output checks and status persistence. | Pipeline execution strategies or working-directory management. |
 | `workflows/factories.py` | CLI argument normalization and dependency construction. | Execution results. |
 | `workflows/services/models.py` | `PipelineRequest` and `ExecutionOptions`. | Workflow instances. |
 | `workflows/services/dataset.py` | Project discovery, `Study` construction, cached table fallbacks and timestamped log paths. | Workflow instances. |
@@ -71,10 +74,17 @@ values and child CLI flags. Concrete runners retain their setup, persistence,
 archive and cleanup decisions. No shared execution code branches on concrete
 runner classes.
 
-`BasePipelineWorkflow` remains for `PipelineTracker`. It delegates local execution
-and artifact loading to the same modules. Tracking retains participant/session
-items even when a step declares a broader analysis level. Dataset initialization,
-reorganization, curation and pipeline-store workflows retain their dataset base.
+`PipelineTracker` inherits directly from `BaseDatasetWorkflow`, reuses its `Study`
+when assembling dependencies, and delegates local execution, artifact loading and
+template rendering to the same modules. The single-subclass `BasePipelineWorkflow`
+and its `nipoppy.workflows.pipeline` import path have been removed without a
+compatibility shim. Tracking retains participant/session items even when a step
+declares a broader analysis level, while still validating filter compatibility.
+It disables file logging, persists status after ordered local execution, and
+neither creates nor removes pipeline working directories. Missing expected outputs
+produce failed processing-status records without counting as execution exceptions.
+Dataset initialization, reorganization, curation and pipeline-store workflows
+retain their dataset base.
 
 ## Lifecycle and compatibility rules
 
