@@ -760,7 +760,9 @@ class BasePipelineWorkflow(BaseDatasetWorkflow, ABC):
             )
             self.return_code = ReturnCode.NO_PARTICIPANTS_OR_SESSIONS_TO_RUN
         elif self.hpc is not None:
-            if self.n_success == 0:
+            if getattr(self, "simulate", False):
+                logger.success(f"Simulated {self.n_total} HPC job(s)")
+            elif self.n_success == 0:
                 logger.failure("Failed to submit HPC jobs")
             else:
                 logger.success(f"Successfully submitted {self.n_success} HPC job(s)")

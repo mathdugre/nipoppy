@@ -189,7 +189,11 @@ def test_hpc_runner(runner: Runner):
     assert runner.hpc_runner.subcommand == runner.subcommand
 
 
-def test_submit_hpc_job(runner: Runner, mocker: pytest_mock.MockFixture):
+@pytest.mark.parametrize("simulate", [True, False])
+def test_submit_hpc_job(
+    simulate: bool, runner: Runner, mocker: pytest_mock.MockFixture
+):
+    runner.simulate = simulate
 
     mocker.patch.object(
         runner,
@@ -234,10 +238,21 @@ def test_submit_hpc_job(runner: Runner, mocker: pytest_mock.MockFixture):
         pipeline_version=runner.pipeline_version,
         pipeline_step=runner.pipeline_step,
         dry_run=runner.dry_run,
+        simulate=simulate,
     )
 
     assert runner.n_success == n_jobs_submitted
     assert runner.n_total == len(participants_sessions)
+
+
+def test_log_summary_message_hpc_simulate(
+    runner: Runner, caplog: pytest.LogCaptureFixture
+):
+    runner.hpc = "slurm"
+    runner.simulate = True
+    runner.n_total = 2
+    runner._log_summary_message()
+    assert "Simulated 2 HPC job(s)" in caplog.text
 
 
 def test_run_main_hpc(mocker: pytest_mock.MockFixture, runner: Runner):

@@ -433,3 +433,56 @@ def test_hpc_runner_generate_cli_fails_duplicate_flags(hpc_runner: HPCRunner):
             session_id="1",
             extra_flags=[duplicate_flag],
         )
+
+
+@pytest.mark.parametrize(
+    "hpc_type,job_name_directive",
+    [("slurm", "#SBATCH --job-name=my-job"), ("sge", "#$ -N my-job")],
+)
+def test_hpc_runner_submit_simulate(
+    hpc_type: str,
+    job_name_directive: str,
+    hpc_runner: HPCRunner,
+    submit_kwargs: dict,
+    mocker: pytest_mock.MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Test HPCRunner.submit with simulate=True writes script and does not submit."""
+    hpc_runner.hpc_cluster = hpc_type
+    mocked_submit_job = mocker.patch.object(hpc_runner._queue_adapter, "submit_job")
+    mocked_get_slots = mocker.patch.object(hpc_runner, "_get_n_available_job_slots")
+
+    n_jobs = hpc_runner.submit(**submit_kwargs, simulate=True)
+
+    assert n_jobs == len(submit_kwargs["job_array_commands"])
+    mocked_submit_job.assert_not_called()
+    mocked_get_slots.assert_not_called()
+
+    fpath_script = submit_kwargs["dpath_work"] / submit_kwargs["fname_job_script"]
+    assert fpath_script.exists()
+    content = fpath_script.read_text()
+    assert job_name_directive in content
+    assert 'COMMANDS=( \\\n"echo test" \\\n"echo test2" \\\n)' in content
+    assert "module load some_module" in content
+    assert "Job script created at " in caplog.text
+    assert "HPC job ID" not in caplog.text
+
+
+def test_hpc_runner_submit_simulate_dry_run(
+    hpc_runner: HPCRunner,
+    submit_kwargs: dict,
+    mocker: pytest_mock.MockerFixture,
+):
+    """Test submit with simulate=True and dry_run=True does not write script."""
+    mocked_submit_job = mocker.patch.object(hpc_runner._queue_adapter, "submit_job")
+    mocked_get_slots = mocker.patch.object(hpc_runner, "_get_n_available_job_slots")
+
+    submit_kwargs["dry_run"] = True
+    n_jobs = hpc_runner.submit(**submit_kwargs, simulate=True)
+
+    assert n_jobs == len(submit_kwargs["job_array_commands"])
+    mocked_submit_job.assert_not_called()
+    mocked_get_slots.assert_not_called()
+
+    fpath_script = submit_kwargs["dpath_work"] / submit_kwargs["fname_job_script"]
+    assert not fpath_script.exists()

@@ -192,14 +192,18 @@ def test_run_setup(runner: ProcessingRunner, mocker: pytest_mock.MockFixture):
 
 
 @pytest.mark.parametrize("keep_workdir", [True, False])
-def test_run_cleanup(runner: ProcessingRunner, keep_workdir):
+@pytest.mark.parametrize("simulate", [True, False])
+@pytest.mark.parametrize("hpc", [None, "slurm"])
+def test_run_cleanup(runner: ProcessingRunner, keep_workdir, simulate, hpc):
     runner.keep_workdir = keep_workdir
+    runner.simulate = simulate
+    runner.hpc = hpc
     dpaths = [runner.dpath_pipeline_bids_db, runner.dpath_pipeline_work]
     for dpath in dpaths:
         dpath.mkdir(parents=True)
     runner.run_cleanup()
     for dpath in dpaths:
-        if keep_workdir:
+        if keep_workdir or (simulate and hpc is not None):
             assert dpath.exists()
         else:
             assert not dpath.exists()

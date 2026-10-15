@@ -131,6 +131,7 @@ class Runner(BasePipelineWorkflow, ABC):
             pipeline_version=self.pipeline_version,
             pipeline_step=self.pipeline_step,
             dry_run=self.dry_run,
+            simulate=self.simulate,
         )
 
         # for logging

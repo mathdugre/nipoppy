@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import shutil
 import sys
 from functools import cached_property
 from pathlib import Path
@@ -184,6 +185,21 @@ class HPCRunner:
 
         return max(0, self.queue_limit - len(df_queue_status))
 
+    def _write_job_script(
+        self, job_submission_kwargs: dict, fpath_job_script: Path
+    ) -> None:
+        """Write a job script without submitting it to the scheduler.
+
+        PySQA does not expose script generation on its public adapter, so the
+        private call is isolated here from the submission flow.
+        """
+        _, queue_script_path = self._queue_adapter._adapter._write_queue_script(
+            **job_submission_kwargs
+        )
+        queue_script_path = Path(queue_script_path)
+        if queue_script_path != fpath_job_script and queue_script_path.exists():
+            shutil.move(queue_script_path, fpath_job_script)
+
     def submit(
         self,
         job_name: str,
@@ -198,6 +214,7 @@ class HPCRunner:
         pipeline_version: str,
         pipeline_step: str,
         dry_run: bool = False,
+        simulate: bool = False,
     ) -> int | None:
         """
         Submit a job to the HPC scheduler.
@@ -228,16 +245,19 @@ class HPCRunner:
             Step of the pipeline being run.
         dry_run : bool, optional
             Whether to only generate the script without submitting, by default False.
+        simulate : bool, optional
+            Whether to only generate the script without submitting, by default False.
 
         Returns
         -------
         int
             The number of jobs submitted
         """
-        n_available_jobs = self._get_n_available_job_slots()
-        job_array_commands = job_array_commands[:n_available_jobs]
-        participant_ids = participant_ids[:n_available_jobs]
-        session_ids = session_ids[:n_available_jobs]
+        if not simulate:
+            n_available_jobs = self._get_n_available_job_slots()
+            job_array_commands = job_array_commands[:n_available_jobs]
+            participant_ids = participant_ids[:n_available_jobs]
+            session_ids = session_ids[:n_available_jobs]
 
         # skip if there are no jobs to submit
         if len(job_array_commands) == 0:
@@ -259,26 +279,32 @@ class HPCRunner:
 
         # user-defined args
         job_args = self._check_hpc_config()
+        job_submission_kwargs = {
+            "queue": self.hpc_cluster,
+            "working_directory": str(dpath_work),
+            "command": "",  # not used in default template but cannot be None
+            "cores": 0,  # not used in default template but cannot be None
+            "NIPOPPY_HPC": self.hpc_cluster,
+            "NIPOPPY_JOB_NAME": job_name,
+            "NIPOPPY_DPATH_LOGS": dpath_hpc_logs,
+            "NIPOPPY_HPC_PREAMBLE_STRINGS": self.preamble,
+            "NIPOPPY_COMMANDS": job_array_commands,
+            "NIPOPPY_DPATH_ROOT": self.dpath_root,
+            "NIPOPPY_PIPELINE_NAME": pipeline_name,
+            "NIPOPPY_PIPELINE_VERSION": pipeline_version,
+            "NIPOPPY_PIPELINE_STEP": pipeline_step,
+            "NIPOPPY_PARTICIPANT_IDS": participant_ids,
+            "NIPOPPY_SESSION_IDS": session_ids,
+            **job_args,
+        }
 
         job_id = None
-        if not dry_run:
-            job_id = self._queue_adapter.submit_job(
-                queue=self.hpc_cluster,
-                working_directory=str(dpath_work),
-                command="",  # not used in default template but cannot be None
-                cores=0,  # not used in default template but cannot be None
-                NIPOPPY_HPC=self.hpc_cluster,
-                NIPOPPY_JOB_NAME=job_name,
-                NIPOPPY_DPATH_LOGS=dpath_hpc_logs,
-                NIPOPPY_HPC_PREAMBLE_STRINGS=self.preamble,
-                NIPOPPY_COMMANDS=job_array_commands,
-                NIPOPPY_DPATH_ROOT=self.dpath_root,
-                NIPOPPY_PIPELINE_NAME=pipeline_name,
-                NIPOPPY_PIPELINE_VERSION=pipeline_version,
-                NIPOPPY_PIPELINE_STEP=pipeline_step,
-                NIPOPPY_PARTICIPANT_IDS=participant_ids,
-                NIPOPPY_SESSION_IDS=session_ids,
-                **job_args,
+        if not (simulate or dry_run):
+            job_id = self._queue_adapter.submit_job(**job_submission_kwargs)
+        elif simulate and not dry_run:
+            self._write_job_script(
+                job_submission_kwargs=job_submission_kwargs,
+                fpath_job_script=dpath_work / fname_job_script,
             )
 
         fpath_job_script = dpath_work / fname_job_script
