@@ -29,7 +29,35 @@ from nipoppy.cli.options import (
     runners_options,
 )
 from nipoppy.cli.pipeline_catalog import pipeline
+from nipoppy.cli.release_check import ReleaseCheck
 from nipoppy.env import FPATH_USER_CONFIG, PROGRAM_VERSION
+
+
+class NipoppyCLI(OrderedAliasedGroupWithDotenv):
+    """Root CLI group that performs a best-effort release check."""
+
+    def main(self, *args, **kwargs):
+        """Run the CLI while keeping the release check independent.
+
+        Parameters
+        ----------
+        *args
+            Positional arguments passed to Click's main method.
+        **kwargs
+            Keyword arguments passed to Click's main method.
+
+        Returns
+        -------
+        Any
+            The exit status or result returned by Click's main method.
+        """
+        release_check = ReleaseCheck.start()
+        try:
+            return super().main(*args, **kwargs)
+        finally:
+            if release_check is not None:
+                release_check.finish()
+
 
 click.rich_click.OPTION_GROUPS = {
     "nipoppy *": [
@@ -96,7 +124,7 @@ click.rich_click.OPTION_GROUPS = {
 
 @tui(command="gui", help="Open the Nipoppy terminal GUI.")
 @click.group(
-    cls=OrderedAliasedGroupWithDotenv,
+    cls=NipoppyCLI,
     context_settings={"help_option_names": ["-h", "--help"], "show_default": True},
     epilog=(
         "Run 'nipoppy COMMAND --help' for more information on a subcommand.\n\n"

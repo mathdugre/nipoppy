@@ -2,6 +2,7 @@
 
 import os
 from enum import Enum
+from pathlib import Path
 from typing import TypeVar
 
 try:
@@ -51,7 +52,7 @@ BIDS_PATH_INJECTION_PREFIX = "BIDS_PATH_INJECTION_"
 DEFAULT_PIPELINE_STEP_NAME = "default"
 
 # user-level config
-FPATH_USER_CONFIG = "~/.nipoppy/config.json"
+FPATH_USER_CONFIG = Path("~/.nipoppy/config.json")
 
 # file extensions
 EXT_TAR = ".tar"

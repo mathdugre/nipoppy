@@ -82,6 +82,12 @@ Nipoppy was installed successfully if the {term}`CLI` runs. The following comman
 $ nipoppy -h
 ```
 
+### Release checks
+
+Nipoppy checks GitHub for newer releases, caching results for 24 hours to limit
+requests. The background check has a short timeout and never blocks commands.
+Set `NIPOPPY_DISABLE_RELEASE_CHECK=1` to disable checks and warnings.
+
 ### Enable shell completion
 We list the configuration for `bash` and `zsh` shells. For more details on shell completion with Click, visit the official documentation at: https://click.palletsprojects.com/en/stable/shell-completion/
 

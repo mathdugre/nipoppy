@@ -14,6 +14,7 @@ import pytest
 import pytest_mock
 from fids.fids import create_fake_bids_dataset
 
+from nipoppy.cli.release_check import DISABLE_RELEASE_CHECK_ENVVAR
 from nipoppy.config.main import Config
 from nipoppy.config.schema import get_current_schema_version
 from nipoppy.env import (
@@ -107,6 +108,12 @@ def restore_environment():
     yield
     os.environ.clear()
     os.environ.update(environment_to_restore)
+
+
+@pytest.fixture(autouse=True)
+def disable_release_check(monkeypatch: pytest.MonkeyPatch):
+    """Keep the test suite independent of the external GitHub API."""
+    monkeypatch.setenv(DISABLE_RELEASE_CHECK_ENVVAR, "1")
 
 
 def list_cli_commands(
