@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import json
 import logging
 import shlex
 from pathlib import Path
@@ -14,15 +13,12 @@ import pytest_mock
 import rich_click as click
 from click.testing import CliRunner
 
-from nipoppy.cli import (
-    BUG_REPORT_URL,
-    DISCORD_URL,
-    exception_handler,
-)
 from nipoppy.cli.cli import cli
 from nipoppy.cli.groups import OrderedAliasedGroupWithDotenv
+from nipoppy.cli.handler import exception_handler
 from nipoppy.cli.options import study_option
-from nipoppy.exceptions import JSONError, NipoppyError, ReturnCode
+from nipoppy.exceptions import NipoppyError, ReturnCode
+from nipoppy.workflows.base import BaseWorkflow
 from nipoppy.zenodo_api import ZenodoAPIError
 from tests.conftest import PASSWORD_FILE, list_cli_commands
 
@@ -161,7 +157,7 @@ def test_study_and_dataset_mutually_exclusive(
         ["init", "--study", f"{tmp_path}/study1", "--dataset", f"{tmp_path}/study2"],
         catch_exceptions=False,
     )
-    assert result.exit_code != ReturnCode.SUCCESS
+    assert result.exit_code == ReturnCode.INVALID_ARGUMENT
     assert not any(
         "Cannot specify both --study and --dataset" in record.message
         for record in caplog.records
@@ -198,185 +194,182 @@ def test_cli_gui_visibility(monkeypatch, trogon_installed):
     assert ("Open the Nipoppy terminal GUI. " in result.output) == trogon_installed
 
 
-@pytest.mark.parametrize(
+CLI_COMMAND_PARAMS = [
     (
-        "command",
-        "workflow",
+        ["--help"],
+        None,
     ),
-    [
-        (
-            ["--help"],
-            None,
-        ),
-        (
-            [
-                "init",
-                "--study",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.dataset_init.InitWorkflow",
-        ),
-        (
-            [
-                "track-curation",
-                "--study",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.track_curation.TrackCurationWorkflow",
-        ),
-        (
-            [
-                "reorg",
-                "--study",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.dicom_reorg.DicomReorgWorkflow",
-        ),
-        (
-            [
-                "bidsify",
-                "--study",
-                "[mocked_dir]",
-                "--pipeline",
-                "my_pipeline",
-                "--pipeline-version",
-                "1.0",
-                "--pipeline-step",
-                "step1",
-            ],
-            "nipoppy.workflows.bids_conversion.BIDSificationRunner",
-        ),
-        (
-            [
-                "process",
-                "--study",
-                "[mocked_dir]",
-                "--pipeline",
-                "my_pipeline",
-                "--pipeline-version",
-                "1.0",
-            ],
-            "nipoppy.workflows.processing_runner.ProcessingRunner",
-        ),
-        (
-            [
-                "track-processing",
-                "--study",
-                "[mocked_dir]",
-                "--pipeline",
-                "my_pipeline",
-                "--pipeline-version",
-                "1.0",
-            ],
-            "nipoppy.workflows.tracker.PipelineTracker",
-        ),
-        (
-            [
-                "extract",
-                "--study",
-                "[mocked_dir]",
-                "--pipeline",
-                "my_pipeline",
-                "--pipeline-version",
-                "1.0",
-            ],
-            "nipoppy.workflows.extractor.ExtractionRunner",
-        ),
-        (
-            [
-                "status",
-                "--study",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.dataset_status.StatusWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "search",
-                "mriqc",
-            ],
-            "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "search",
-                "mriqc",
-                "--type",
-                "processing",
-            ],
-            "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "search",
-                "--password-file",
-                str(PASSWORD_FILE),
-            ],
-            "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "create",
-                "--type",
-                "processing",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.pipeline_store.create.PipelineCreateWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "install",
-                "--study",
-                "[mocked_dir]",
-                "zenodo.123456",
-            ],
-            "nipoppy.workflows.pipeline_store.install.PipelineInstallWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "install",
-                "--study",
-                "[mocked_dir]",
-                "zenodo.123456",
-                "--password-file",
-                str(PASSWORD_FILE),
-            ],
-            "nipoppy.workflows.pipeline_store.install.PipelineInstallWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "list",
-                "--study",
-                "[mocked_dir]",
-            ],
-            "nipoppy.workflows.pipeline_store.list.PipelineListWorkflow",
-        ),
-        (
-            ["pipeline", "validate", "[mocked_dir]"],
-            "nipoppy.workflows.pipeline_store.validate.PipelineValidateWorkflow",
-        ),
-        (
-            [
-                "pipeline",
-                "upload",
-                "[mocked_dir]",
-                "--zenodo-id",
-                "zenodo.123456",
-                "--password-file",
-                str(PASSWORD_FILE),
-                "--community",
-            ],
-            "nipoppy.workflows.pipeline_store.upload.PipelineUploadWorkflow",
-        ),
-    ],
-)
+    (
+        [
+            "init",
+            "--study",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.dataset_init.InitWorkflow",
+    ),
+    (
+        [
+            "track-curation",
+            "--study",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.track_curation.TrackCurationWorkflow",
+    ),
+    (
+        [
+            "reorg",
+            "--study",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.dicom_reorg.DicomReorgWorkflow",
+    ),
+    (
+        [
+            "bidsify",
+            "--study",
+            "[mocked_dir]",
+            "--pipeline",
+            "my_pipeline",
+            "--pipeline-version",
+            "1.0",
+            "--pipeline-step",
+            "step1",
+        ],
+        "nipoppy.workflows.bids_conversion.BIDSificationRunner",
+    ),
+    (
+        [
+            "process",
+            "--study",
+            "[mocked_dir]",
+            "--pipeline",
+            "my_pipeline",
+            "--pipeline-version",
+            "1.0",
+        ],
+        "nipoppy.workflows.processing_runner.ProcessingRunner",
+    ),
+    (
+        [
+            "track-processing",
+            "--study",
+            "[mocked_dir]",
+            "--pipeline",
+            "my_pipeline",
+            "--pipeline-version",
+            "1.0",
+        ],
+        "nipoppy.workflows.tracker.PipelineTracker",
+    ),
+    (
+        [
+            "extract",
+            "--study",
+            "[mocked_dir]",
+            "--pipeline",
+            "my_pipeline",
+            "--pipeline-version",
+            "1.0",
+        ],
+        "nipoppy.workflows.extractor.ExtractionRunner",
+    ),
+    (
+        [
+            "status",
+            "--study",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.dataset_status.StatusWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "search",
+            "mriqc",
+        ],
+        "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "search",
+            "mriqc",
+            "--type",
+            "processing",
+        ],
+        "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "search",
+            "--password-file",
+            str(PASSWORD_FILE),
+        ],
+        "nipoppy.workflows.pipeline_store.search.PipelineSearchWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "create",
+            "--type",
+            "processing",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.pipeline_store.create.PipelineCreateWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "install",
+            "--study",
+            "[mocked_dir]",
+            "zenodo.123456",
+        ],
+        "nipoppy.workflows.pipeline_store.install.PipelineInstallWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "install",
+            "--study",
+            "[mocked_dir]",
+            "zenodo.123456",
+            "--password-file",
+            str(PASSWORD_FILE),
+        ],
+        "nipoppy.workflows.pipeline_store.install.PipelineInstallWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "list",
+            "--study",
+            "[mocked_dir]",
+        ],
+        "nipoppy.workflows.pipeline_store.list.PipelineListWorkflow",
+    ),
+    (
+        ["pipeline", "validate", "[mocked_dir]"],
+        "nipoppy.workflows.pipeline_store.validate.PipelineValidateWorkflow",
+    ),
+    (
+        [
+            "pipeline",
+            "upload",
+            "[mocked_dir]",
+            "--zenodo-id",
+            "zenodo.123456",
+            "--password-file",
+            str(PASSWORD_FILE),
+            "--community",
+        ],
+        "nipoppy.workflows.pipeline_store.upload.PipelineUploadWorkflow",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "workflow"), CLI_COMMAND_PARAMS)
 def test_cli_command(
     command: list[str],
     workflow: str | None,
@@ -396,189 +389,159 @@ def test_cli_command(
     _assert_command_success(command)
 
 
-def test_context_manager_no_exception(mocker):
-    """Test that the context manager exits with SUCCESS when no exception occurs."""
-    workflow = mocker.Mock()
-    workflow.return_code = ReturnCode.SUCCESS
-    mock_exit = mocker.patch("sys.exit")
-
-    with exception_handler(workflow):
-        pass
-
-    mock_exit.assert_called_once_with(ReturnCode.SUCCESS)
-
-
-@pytest.mark.parametrize(
-    "return_code, expected_return_code",
-    [
-        (None, ReturnCode.UNKNOWN_FAILURE),
-        (ReturnCode.UNKNOWN_FAILURE, ReturnCode.UNKNOWN_FAILURE),
-        (ReturnCode.INVALID_ARGUMENT, ReturnCode.INVALID_ARGUMENT),
-    ],
-)
-def test_context_manager_system_exit_exception(
-    mocker: pytest_mock.MockerFixture, return_code, expected_return_code, caplog
-):
-    """Test that the context manager handles exceptions correctly.
-
-    SystemExit should set the workflow return code to the
-    exception's code. Other exceptions should set it to UNKNOWN_FAILURE.
-    """
-    # Prevent sys.exit from actually exiting the test runner
-    mock_exit = mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-    with exception_handler(workflow):
-        if return_code is None:
-            raise SystemExit
-        else:
-            raise SystemExit(return_code)
-
-    assert workflow.return_code == expected_return_code
-    mock_exit.assert_called_once_with(expected_return_code)
-
-
 class MyCustomException(NipoppyError):
     code = 999
 
 
-@pytest.mark.parametrize(
-    "exception,return_code",
-    [
-        (NipoppyError, NipoppyError.code),
-        (ZenodoAPIError, ReturnCode.KNOWN_FAILURE),
-        (MyCustomException, MyCustomException.code),
-    ],
-)
-def test_context_manager_nipoppy_exception(
-    mocker: pytest_mock.MockerFixture, exception: Exception, return_code: int
-):
-    """Test that the context manager handles exceptions correctly.
+class FailingWorkflow(BaseWorkflow):
+    """Workflow whose main step raises a custom error."""
 
-    NipoppyError and its subclasses should set the workflow return code to the
-    exception's code. Other exceptions should set it to UNKNOWN_FAILURE.
-    """
-    # Prevent sys.exit from actually exiting the test runner
-    mock_exit = mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-    with exception_handler(workflow):
-        raise exception
-
-    assert workflow.return_code == return_code
-    mock_exit.assert_called_once_with(return_code)
+    def run_main(self):
+        """Raise a custom error."""
+        raise MyCustomException("workflow failed")
 
 
-@pytest.mark.parametrize("hint", ["", "This is a hint."])
-def test_context_manager_nipoppy_exception_logs_custom_hint(
-    hint, mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
-):
-    """Known NipoppyError should emit custom hint when provided."""
-    mocker.patch("sys.exit")
+class PartialWorkflow(BaseWorkflow):
+    """Workflow that finishes with a partial success."""
 
-    workflow = mocker.Mock()
-    with exception_handler(workflow):
-        raise NipoppyError("Invalid project config", hint=hint)
+    def run_main(self):
+        """Set a partial success return code."""
+        self.return_code = ReturnCode.PARTIAL_SUCCESS
 
-    assert any(
-        "Troubleshooting:" in record.message and hint in record.message
-        for record in caplog.records
+
+class TestExceptionHandler:
+    """Tests for the CLI exception handler context manager."""
+
+    def test_registered_workflow_return_code(self, mocker: pytest_mock.MockerFixture):
+        """Exit with the return code of the registered workflow."""
+        mock_exit = mocker.patch("sys.exit")
+
+        with exception_handler() as handle:
+            handle.run(PartialWorkflow(name="partial"))
+
+        mock_exit.assert_called_once_with(ReturnCode.PARTIAL_SUCCESS)
+
+    def test_exception_before_registration(
+        self, mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
+    ):
+        """Map and log an error raised before a workflow is registered."""
+        mock_exit = mocker.patch("sys.exit")
+
+        with exception_handler():
+            raise MyCustomException("init failed")
+
+        mock_exit.assert_called_once_with(MyCustomException.code)
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "init failed" in r.message
+        ]
+        assert len(errors) == 1
+
+    def test_exception_from_registered_workflow(
+        self, mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
+    ):
+        """Exit with the code set by BaseWorkflow.run, without logging twice."""
+        mock_exit = mocker.patch("sys.exit")
+
+        with exception_handler() as handle:
+            handle.run(FailingWorkflow(name="failing"))
+
+        mock_exit.assert_called_once_with(MyCustomException.code)
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "workflow failed" in r.message
+        ]
+        assert len(errors) == 1
+
+
+class TestCliErrorHandling:
+    """Errors in the CLI are mapped to return codes."""
+
+    @pytest.mark.parametrize(
+        ("command", "workflow"),
+        [params for params in CLI_COMMAND_PARAMS if params[1] is not None],
     )
+    def test_cli_workflow_init_error_is_handled(
+        self,
+        command: list[str],
+        workflow: str,
+        mocker: pytest_mock.MockerFixture,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Errors raised in a workflow's __init__ are mapped to their return code."""
+        mocked_dir = tmp_path.joinpath("mocked_dir")
+        mocked_dir.mkdir(exist_ok=False)
+        command = [arg.replace("[mocked_dir]", str(mocked_dir)) for arg in command]
 
-
-def test_context_manager_nipoppy_exception_logs_default_hint(
-    mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
-):
-    """Known NipoppyError should emit default hint when none provided."""
-    mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-    default_hint = "This is a default hint."
-    with exception_handler(workflow):
-        e = NipoppyError("Invalid project config", hint=None)
-        e.default_hint = default_hint
-        raise e
-
-    assert any(
-        f"Troubleshooting: {default_hint}" in record.message
-        for record in caplog.records
-    )
-
-
-def test_context_manager_json_error(
-    mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
-):
-    """Test that JSONError includes the file path in the error message."""
-    mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-    fpath = "invalid.json"
-    with exception_handler(workflow):
-        raise JSONError(
-            json.JSONDecodeError("Invalid JSON", "{}", 10),
-            fpath=Path(fpath),
+        mocker.patch(
+            f"{workflow}.__init__", side_effect=MyCustomException("init failed")
         )
-    assert any(
-        f"Invalid JSON: {fpath}: line 1 column 11 (char 10)" in record.message
-        for record in caplog.records
+        result = runner.invoke(cli, command, catch_exceptions=False)
+
+        assert result.exit_code == MyCustomException.code
+        assert any("init failed" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "subcommand",
+        [
+            ["search", "mriqc"],
+            ["install", "--study", "[tmp_path]", "zenodo.123456"],
+            [
+                "upload",
+                "[tmp_path]",
+                "--password-file",
+                str(PASSWORD_FILE),
+            ],
+        ],
     )
+    def test_cli_zenodo_api_init_error_is_handled(
+        self,
+        subcommand: list[str],
+        mocker: pytest_mock.MockerFixture,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Errors raised while constructing ZenodoAPI are handled."""
+        mocker.patch(
+            "nipoppy.cli.pipeline_catalog.ZenodoAPI",
+            side_effect=ZenodoAPIError("zenodo failed"),
+        )
+        command = ["pipeline"] + [
+            arg.replace("[tmp_path]", str(tmp_path)) for arg in subcommand
+        ]
+        result = runner.invoke(cli, command, catch_exceptions=False)
 
+        assert result.exit_code == ReturnCode.KNOWN_FAILURE
+        assert any("zenodo failed" in r.message for r in caplog.records)
 
-@pytest.mark.parametrize(
-    "return_code", [(None), (ReturnCode.UNKNOWN_FAILURE), (ReturnCode.INVALID_ARGUMENT)]
-)
-@pytest.mark.parametrize("exception", [Exception, RuntimeError])
-def test_context_manager_unknown_exception(
-    mocker: pytest_mock.MockerFixture,
-    exception,
-    return_code,
-    caplog: pytest.LogCaptureFixture,
-):
-    """Test that the context manager handles exceptions correctly.
-
-    Unknown exception (Exception) should always set the return code to UNKNOWN_FAILURE.
-    """
-    # Prevent sys.exit from actually exiting the test runner
-    mock_exit = mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-    with exception_handler(workflow):
-        if return_code is None:
-            raise exception
-        else:
-            raise exception(code=return_code)
-
-    # Exit code is always set to UNKNOWN_FAILURE for unknown exceptions
-    assert workflow.return_code == ReturnCode.UNKNOWN_FAILURE
-    mock_exit.assert_called_once_with(ReturnCode.UNKNOWN_FAILURE)
-    assert any(BUG_REPORT_URL in record.message for record in caplog.records)
-    assert any(DISCORD_URL in record.message for record in caplog.records)
-
-
-def test_context_manager_pydantic_failed_validation(
-    mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture
-):
-    """Test that the context manager handles pydantic ValidationError correctly."""
-    from pydantic import BaseModel
-
-    # Prevent sys.exit from actually exiting the test runner
-    mock_exit = mocker.patch("sys.exit")
-
-    workflow = mocker.Mock()
-
-    class MockedModel(BaseModel):
-        field: int
-
-    with exception_handler(workflow):
-        MockedModel(field="invalid")  # will raise ValidationError
-
-    assert workflow.return_code == ReturnCode.INVALID_CONFIG
-    mock_exit.assert_called_once_with(ReturnCode.INVALID_CONFIG)
-    assert any(
-        "Troubleshooting:" in record.message
-        and "Review your configuration fields and value types" in record.message
-        for record in caplog.records
-    )
+    def test_cli_missing_dependency(
+        self,
+        mocker: pytest_mock.MockerFixture,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        rendered_console,
+    ):
+        """Exit with 152 and show the missing dependency hint verbatim."""
+        mocker.patch("nipoppy.workflows.pipeline.JOBLIB_INSTALLED", False)
+        result = runner.invoke(
+            cli,
+            [
+                "track-processing",
+                "--study",
+                str(tmp_path),
+                "--pipeline",
+                "p",
+                "--n-jobs",
+                "2",
+            ],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == ReturnCode.MISSING_DEPENDENCY == 152
+        assert any("pip install nipoppy[parallel]" in r.message for r in caplog.records)
+        assert "pip install nipoppy[parallel]" in rendered_console.getvalue()
 
 
 @pytest.mark.parametrize("command", list_cli_commands(cli))

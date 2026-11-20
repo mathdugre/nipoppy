@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import io
 import os
 from collections.abc import Generator
 from pathlib import Path
@@ -13,6 +14,7 @@ import pandas as pd
 import pytest
 import pytest_mock
 from fids.fids import create_fake_bids_dataset
+from rich.console import Console
 
 from nipoppy.config.main import Config
 from nipoppy.config.schema import get_current_schema_version
@@ -455,3 +457,18 @@ def _set_up_substitution_testing(_object, mocker: pytest_mock.MockerFixture):
     return mocker.patch.object(
         _object, "process_template_json", side_effect=_object.process_template_json
     )
+
+
+@pytest.fixture
+def rendered_console(mocker):
+    """Capture the text the nipoppy logger renders on the console.
+
+    Covers stdout and stderr.
+
+    Returns the buffer holding the rendered text.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=500, force_terminal=False)
+    mocker.patch.object(get_logger()._stderr_handler, "console", console)
+    mocker.patch.object(get_logger()._stdout_handler, "console", console)
+    return buffer

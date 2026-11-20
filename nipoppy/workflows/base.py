@@ -11,9 +11,17 @@ from functools import cached_property
 from pathlib import Path
 from typing import Protocol
 
+from pydantic_core import ValidationError
+
 from nipoppy.base import Base
-from nipoppy.env import EXT_LOG, PROGRAM_NAME, StrOrPathLike
-from nipoppy.exceptions import FileOperationError, ReturnCode
+from nipoppy.env import (
+    BUG_REPORT_URL,
+    DISCORD_URL,
+    EXT_LOG,
+    PROGRAM_NAME,
+    StrOrPathLike,
+)
+from nipoppy.exceptions import FileOperationError, NipoppyError, ReturnCode
 from nipoppy.layout import DatasetLayout
 from nipoppy.logger import get_logger
 from nipoppy.study import Study
@@ -27,8 +35,40 @@ from nipoppy.utils.utils import (
     add_path_timestamp,
     is_nipoppy_project,
 )
+from nipoppy.zenodo_api import ZenodoAPIError
 
 logger = get_logger()
+
+
+def handle_exception(exception: BaseException) -> int:
+    """Log an exception and return the matching CLI return code."""
+    if isinstance(exception, NipoppyError):
+        return_code = exception.code
+        logger.error(exception, extra={"markup": False})
+        hint = exception.troubleshooting_hint
+        if hint is not None:
+            logger.info(f"Troubleshooting: {hint}", extra={"markup": False})
+    elif isinstance(exception, ValidationError):
+        return_code = ReturnCode.INVALID_CONFIG
+        logger.error(exception, extra={"markup": False})
+        logger.info(
+            "Troubleshooting: Review your configuration fields and value types."
+        )
+    elif isinstance(exception, ZenodoAPIError):
+        return_code = ReturnCode.KNOWN_FAILURE
+        logger.error(exception, extra={"markup": False})
+    elif isinstance(exception, KeyboardInterrupt):
+        return_code = ReturnCode.TERMINATED
+        logger.error("Interrupted by user")
+    else:
+        return_code = ReturnCode.UNKNOWN_FAILURE
+        logger.error("Unexpected error occurred", exc_info=exception)
+        logger.info(
+            "This failure was unexpected. Please report it with the command you ran "
+            f"and relevant logs on GitHub: {BUG_REPORT_URL} or ask on Discord: "
+            f"{DISCORD_URL}"
+        )
+    return return_code
 
 
 class LogPrefix:
@@ -175,8 +215,8 @@ class BaseWorkflow(Base, ABC):
         self.dry_run = dry_run
         self.verbose = verbose
 
-        # for the CLI
-        self.return_code = ReturnCode.SUCCESS
+        # set when run() starts (and read by the CLI to exit with it)
+        self.return_code: int | None = None
 
         logger.set_verbose(self.verbose)
 
@@ -196,14 +236,21 @@ class BaseWorkflow(Base, ABC):
         pass
 
     def run(self):
-        """Run the workflow."""
+        """Run the workflow.
+
+        Sets ``self.return_code``. On failure, the error is logged, mapped to a
+        return code, and re-raised so Python API callers can handle it.
+        """
+        self.return_code = ReturnCode.SUCCESS
         try:
-            self.run_setup()
-            self.run_main()
-        except Exception:
+            try:
+                self.run_setup()
+                self.run_main()
+            finally:
+                self.run_cleanup()
+        except (Exception, KeyboardInterrupt) as exception:
+            self.return_code = handle_exception(exception)
             raise
-        finally:
-            self.run_cleanup()
 
 
 class BaseDatasetWorkflow(BaseWorkflow, ABC):

@@ -118,6 +118,12 @@ class TerminatedByUserError(NipoppyError):
     code = ReturnCode.TERMINATED
 
 
+class MissingDependencyError(NipoppyError):
+    """Exception raised when an optional dependency is required but not installed."""
+
+    code = ReturnCode.MISSING_DEPENDENCY
+
+
 class FileOperationError(NipoppyError, IOError):
     """Exception raised for file system operations that fail."""
 
